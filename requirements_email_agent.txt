@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# Slack
+slack-bolt
+
+# OpenAI
+openai
+
+# Gmail
+google-auth
+google-auth-oauthlib
+google-api-python-client
+
+# Database
+sqlalchemy

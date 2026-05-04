@@ -1,0 +1,43 @@
+[33mcommit 56f87bbcd666308ef23bce35ad0abcbfb5aa12a2[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Mon May 4 16:32:36 2026 +0000
+
+    chore: initial commit without secrets
+
+[33mcommit ac88498505ec52d94c1a78391dc1ff9423096c8d[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Mon May 4 16:31:25 2026 +0000
+
+    chore: initial commit without secrets
+
+[33mcommit 98b745d093ac83c40af0fc414bb0fa94ad7645d2[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Mon May 4 16:25:56 2026 +0000
+
+    update
+
+[33mcommit 7c440eeffa074e76952107e81b011f413752f755[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Mon May 4 16:22:23 2026 +0000
+
+    update
+
+[33mcommit c76e0a3a6a0f09b810ec9f5461f2951d9e3c050c[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Mon May 4 16:21:20 2026 +0000
+
+    update to AI agent
+
+[33mcommit 2d8ccf5e9bb9c2098c9d1970a44345e95424794c[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Wed Apr 29 17:53:15 2026 -0400
+
+    Expand README with RAG demo setup instructions
+    
+    Added detailed steps for creating a local RAG demo with Slack integration and outlined phases for development.
+
+[33mcommit 4a500faa70a421e464f28476bf959cbc923dd8d4[m
+Author: normanc0218 <149454253+normanc0218@users.noreply.github.com>
+Date:   Wed Apr 29 17:53:01 2026 -0400
+
+    Initial commit

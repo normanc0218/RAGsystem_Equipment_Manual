@@ -1,14 +1,13 @@
+import asyncio
 import logging
 import os
-from typing import Any, Dict
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from slack_bolt import App
 from slack_bolt.adapter.fastapi import SlackRequestHandler
 
 logger = logging.getLogger(__name__)
-
-# ── Slack app ─────────────────────────────────────────────────────────────────
 
 app = App(
     token=os.getenv("SLACK_BOT_TOKEN"),
@@ -17,346 +16,128 @@ app = App(
 handler = SlackRequestHandler(app)
 router = APIRouter()
 
-# In-memory store: slack user_id → pending classification plan.
-# Good enough for MVP; replace with Redis or DB for multi-instance deploys.
-_pending_plans: Dict[str, Dict[str, Any]] = {}
 
-
-# ── FastAPI mount point ───────────────────────────────────────────────────────
+# ── FastAPI mount ─────────────────────────────────────────────────────────────
 
 @router.post("/slack/events")
 async def slack_events(req: Request):
     return await handler.handle(req)
 
 
-# ── /organise ─────────────────────────────────────────────────────────────────
+# ── ADK runner ────────────────────────────────────────────────────────────────
 
-@app.command("/organise")
-def handle_organise(ack, command, client, respond):
+async def _run_agent_async(task: str, user_id: str) -> str:
+    from google.adk.runners import Runner
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+    from email_agent import root_agent
+
+    session_service = InMemorySessionService()
+    runner = Runner(agent=root_agent, app_name="email_agent", session_service=session_service)
+
+    session = await session_service.create_session(
+        app_name="email_agent",
+        user_id=user_id,
+        state={
+            "user_id": user_id,
+            "dry_run": os.getenv("DRY_RUN", "true").lower() == "true",
+        },
+    )
+
+    response_parts: list[str] = []
+    for event in runner.run(
+        user_id=user_id,
+        session_id=session.id,
+        new_message=types.Content(role="user", parts=[types.Part(text=task)]),
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            for part in event.content.parts:
+                if hasattr(part, "text") and part.text:
+                    response_parts.append(part.text)
+
+    return "".join(response_parts) or "Agent completed with no response."
+
+
+def _run_agent(task: str, user_id: str) -> str:
+    return asyncio.run(_run_agent_async(task, user_id))
+
+
+# ── /organize ─────────────────────────────────────────────────────────────────
+
+@app.command("/organize")
+def handle_organize(ack, command, client, respond):
     ack()
     user_id = command["user_id"]
     channel_id = command["channel_id"]
+    dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+    mode_note = " *(DRY RUN — no changes written to Gmail)*" if dry_run else ""
 
-    respond(text=":inbox_tray: Fetching your emails and generating a plan…")
+    respond(text=":robot_face: Agent is analysing your inbox… this may take a moment.")
 
     try:
-        from app.services.ai_service import classify_emails
-        from app.services.email_provider import get_email_provider
-
-        provider = get_email_provider()
-        emails = provider.fetch_emails(max_results=50)
-
-        if not emails:
-            respond(text="No emails found in your inbox.")
-            return
-
-        plan = classify_emails(emails)
-
-        # Store plan so the Confirm handler can retrieve it without re-fetching
-        _pending_plans[user_id] = {
-            "plan": plan,
-            "emails_by_id": {e["id"]: e for e in emails},
-        }
-
-        client.chat_postMessage(
-            channel=channel_id,
-            blocks=_build_plan_blocks(plan),
-            text="Email organisation plan ready — please review and confirm.",
+        result = _run_agent(
+            f"Fetch my emails. Group related emails by project or topic. "
+            f"Archive promotional emails, newsletters, and automated notifications. "
+            f"Summarize each project group. Report what you did and include the action "
+            f"log IDs so I can undo if needed.{mode_note}",
+            user_id,
         )
-
+        client.chat_postMessage(channel=channel_id, text=result)
     except Exception as exc:
-        logger.exception("Error in /organise")
-        respond(text=f":x: Error: {exc}")
+        logger.exception("Error in /organize")
+        respond(text=f":x: Agent error: {exc}")
 
 
 # ── /digest ───────────────────────────────────────────────────────────────────
 
 @app.command("/digest")
-def handle_digest(ack, command, client):
+def handle_digest(ack, command, client, respond):
     ack()
-    _send_daily_digest(client, command["channel_id"])
+    user_id = command["user_id"]
+    channel_id = command["channel_id"]
 
-
-def _send_daily_digest(slack_client, channel: str) -> None:
-    """Fetch inbox, classify with AI, and post a digest summary to Slack."""
-    from app.services.ai_service import classify_emails
-    from app.services.email_provider import get_email_provider
+    respond(text=":inbox_tray: Generating digest…")
 
     try:
-        provider = get_email_provider()
-        emails = provider.fetch_emails(max_results=50)
-
-        if not emails:
-            slack_client.chat_postMessage(
-                channel=channel,
-                text="*Daily Email Digest*: Inbox is empty — nothing to report.",
-            )
-            return
-
-        plan = classify_emails(emails)
-        summary = plan.get("summary", "No summary available.")
-        items = plan.get("emails", [])
-
-        archive_n = sum(1 for e in items if e.get("suggested_action") == "archive")
-        label_n = sum(1 for e in items if e.get("suggested_action") == "label")
-        keep_n = sum(1 for e in items if e.get("suggested_action") == "keep")
-
-        from datetime import datetime
-
-        slack_client.chat_postMessage(
-            channel=channel,
+        result = _run_agent(
+            "Fetch my emails and give me a concise daily digest: "
+            "what project groups exist with their summaries, total email count, "
+            "and any urgent items that need my attention.",
+            user_id,
+        )
+        client.chat_postMessage(
+            channel=channel_id,
             blocks=[
                 {
                     "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"Email Digest — {datetime.now().strftime('%b %d, %Y')}",
-                    },
+                    "text": {"type": "plain_text", "text": f"Email Digest — {datetime.now().strftime('%b %d, %Y')}"},
                 },
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*Summary:* {summary}"},
-                },
-                {
-                    "type": "section",
-                    "fields": [
-                        {"type": "mrkdwn", "text": f"*Emails analysed:* {len(items)}"},
-                        {
-                            "type": "mrkdwn",
-                            "text": f"*Archive:* {archive_n}  |  *Label:* {label_n}  |  *Keep:* {keep_n}",
-                        },
-                    ],
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "Run `/organise` to review the full plan and confirm actions.",
-                    },
-                },
+                {"type": "section", "text": {"type": "mrkdwn", "text": result}},
             ],
+            text=result,
         )
-    except Exception:
-        logger.exception("Digest failed")
-        slack_client.chat_postMessage(
-            channel=channel,
-            text=":warning: Digest encountered an error. Check server logs.",
-        )
+    except Exception as exc:
+        logger.exception("Error in /digest")
+        respond(text=f":x: Digest error: {exc}")
 
 
-# ── Button: Confirm ───────────────────────────────────────────────────────────
+# ── /undo ─────────────────────────────────────────────────────────────────────
 
-@app.action("confirm_plan")
-def handle_confirm(ack, body, client):
+@app.command("/undo")
+def handle_undo(ack, command, respond):
     ack()
-    user_id = body["user"]["id"]
-    channel_id = body["channel"]["id"]
-    message_ts = body["message"]["ts"]
+    text = command.get("text", "").strip()
 
-    pending = _pending_plans.pop(user_id, None)
-    if not pending:
-        client.chat_postMessage(
-            channel=channel_id,
-            text=":warning: No pending plan found. Run `/organise` again.",
-        )
+    if not text.isdigit():
+        respond(text="Usage: `/undo <action_log_id>`\nExample: `/undo 5`")
         return
 
-    _execute_plan(pending["plan"], user_id, channel_id, client)
-
-    # Replace the plan message with a compact confirmed state
-    client.chat_update(
-        channel=channel_id,
-        ts=message_ts,
-        text="Plan executed.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": ":white_check_mark: *Plan confirmed and executed.* See results above.",
-                },
-            }
-        ],
-    )
-
-
-# ── Button: Cancel ────────────────────────────────────────────────────────────
-
-@app.action("cancel_plan")
-def handle_cancel(ack, body, client):
-    ack()
-    user_id = body["user"]["id"]
-    _pending_plans.pop(user_id, None)
-
-    client.chat_update(
-        channel=body["channel"]["id"],
-        ts=body["message"]["ts"],
-        text="Plan cancelled.",
-        blocks=[
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": ":x: *Plan cancelled.* No changes were made.",
-                },
-            }
-        ],
-    )
-
-
-# ── Block Kit builder ─────────────────────────────────────────────────────────
-
-_ACTION_EMOJI = {"archive": ":file_cabinet:", "label": ":label:", "keep": ":white_check_mark:"}
-
-
-def _build_plan_blocks(plan: Dict[str, Any]) -> list:
-    items = plan.get("emails", [])
-    summary = plan.get("summary", "")
-
-    blocks: list = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": "Email Organisation Plan"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*AI Summary:* {summary}"},
-        },
-        {"type": "divider"},
-    ]
-
-    # Slack has a 50-block limit; show up to 20 email rows safely
-    for item in items[:20]:
-        action = item.get("suggested_action", "keep")
-        emoji = _ACTION_EMOJI.get(action, ":grey_question:")
-        label_suffix = f" → `{item['label']}`" if item.get("label") else ""
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"{emoji} *{action.upper()}*{label_suffix}\n"
-                        f"*Subject:* {item.get('subject', '(no subject)')}\n"
-                        f"_{item.get('reason', '')}_"
-                    ),
-                },
-            }
-        )
-
-    if len(items) > 20:
-        blocks.append(
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"_…and {len(items) - 20} more emails not shown_",
-                },
-            }
-        )
-
-    blocks += [
-        {"type": "divider"},
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Confirm — Execute Plan"},
-                    "style": "primary",
-                    "action_id": "confirm_plan",
-                    "confirm": {
-                        "title": {"type": "plain_text", "text": "Apply to all emails?"},
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": (
-                                f"This will apply suggested actions to *{len(items)} emails*.\n"
-                                "Emails are archived, not deleted. This cannot be undone."
-                            ),
-                        },
-                        "confirm": {"type": "plain_text", "text": "Yes, execute"},
-                        "deny": {"type": "plain_text", "text": "Wait, cancel"},
-                    },
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Cancel"},
-                    "style": "danger",
-                    "action_id": "cancel_plan",
-                },
-            ],
-        },
-    ]
-    return blocks
-
-
-# ── Plan execution ────────────────────────────────────────────────────────────
-
-def _execute_plan(plan: Dict[str, Any], user_id: str, channel_id: str, client) -> None:
-    """Apply the classified actions to Gmail and log every action to SQLite."""
-    from app.database import SessionLocal
-    from app.models.action_log import ActionLog
-    from app.services.email_provider import get_email_provider
-
-    dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
-    provider = get_email_provider()
-    db = SessionLocal()
-    results: list[str] = []
+    log_id = int(text)
+    user_id = command["user_id"]
 
     try:
-        email_items = plan.get("emails", [])[:50]  # hard cap — safety rule #3
-
-        for item in email_items:
-            email_id = item["id"]
-            action = item.get("suggested_action", "keep")
-            label = item.get("label") or ""
-            subject = item.get("subject", email_id)
-            status = "dry_run" if dry_run else "success"
-
-            try:
-                if not dry_run:
-                    if action == "archive":
-                        provider.archive_email(email_id)
-                    elif action == "label" and label:
-                        provider.label_email(email_id, label)
-                    # "keep" → no write call
-
-                db.add(
-                    ActionLog(
-                        user=user_id,
-                        action=action,
-                        email_id=email_id,
-                        email_subject=subject,
-                        label=label or None,
-                        status=status,
-                    )
-                )
-                tag = "[DRY RUN] " if dry_run else ""
-                results.append(f"{tag}{action.upper()}: {subject}")
-
-            except Exception as exc:
-                db.add(
-                    ActionLog(
-                        user=user_id,
-                        action=action,
-                        email_id=email_id,
-                        email_subject=subject,
-                        label=label or None,
-                        status="failed",
-                    )
-                )
-                results.append(f":warning: FAILED ({subject}): {exc}")
-
-        db.commit()
-
-    finally:
-        db.close()
-
-    # Post execution summary
-    header = ":construction: *DRY RUN — no actual changes written to Gmail*\n" if dry_run else ""
-    lines = results[:25]
-    overflow = f"\n_…and {len(results) - 25} more_" if len(results) > 25 else ""
-    client.chat_postMessage(
-        channel=channel_id,
-        text=header + "\n".join(lines) + overflow,
-    )
+        result = _run_agent(f"Undo action log entry #{log_id}.", user_id)
+        respond(text=result)
+    except Exception as exc:
+        logger.exception("Error in /undo")
+        respond(text=f":x: Undo error: {exc}")

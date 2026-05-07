@@ -33,16 +33,24 @@ async def main():
         new_message=types.Content(
             role="user",
             parts=[types.Part(text=(
-                "Fetch my emails, group related ones by project, "
-                "archive promotional emails, summarize each group, "
-                "then show me the action log."
+                "Run the full two-phase workflow: "
+                "first sync my Gmail labels, then batch process up to 200 emails "
+                "(max_results=200, random_sample=True), summarize each group, "
+                "and show me the action log."
             ))],
         ),
     ):
-        if event.is_final_response() and event.content:
+        # Tool calls — what the agent decides to do
+        if event.content and event.content.parts:
             for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    print(part.text)
+                if hasattr(part, "function_call") and part.function_call:
+                    fc = part.function_call
+                    print(f"\n→ TOOL CALL: {fc.name}({dict(fc.args)})")
+                elif hasattr(part, "function_response") and part.function_response:
+                    fr = part.function_response
+                    print(f"← TOOL RESULT: {fr.name} → {str(fr.response)[:300]}")
+                elif hasattr(part, "text") and part.text and event.is_final_response():
+                    print(f"\n{'='*60}\nFINAL RESPONSE:\n{part.text}")
 
 
 asyncio.run(main())

@@ -48,11 +48,49 @@ def get_email_summary(email_id: str) -> dict | None:
     return snap.to_dict() if snap.exists else None
 
 
-def mark_email_processed(email_id: str, group_id: str) -> None:
-    _db().collection(SUMMARIES).document(email_id).update({
+def mark_email_processed(
+    email_id: str,
+    group_id: str,
+    subject: str = "",
+    sender: str = "",
+    date: str = "",
+    snippet: str = "",
+) -> None:
+    _db().collection(SUMMARIES).document(email_id).set({
+        "email_id": email_id,
         "group_id": group_id,
         "processed": True,
-    })
+        "subject": subject,
+        "sender": sender,
+        "date": date,
+        "snippet": snippet,
+    }, merge=True)
+
+
+def list_group_details() -> list[dict]:
+    groups = {g["group_id"]: {**g, "emails": []} for g in list_groups()}
+    summaries = _db().collection(SUMMARIES).stream()
+    for snap in summaries:
+        s = snap.to_dict()
+        gid = s.get("group_id")
+        if gid and gid in groups:
+            groups[gid]["emails"].append({
+                "email_id": s.get("email_id"),
+                "subject": s.get("subject", "(no subject)"),
+                "sender": s.get("sender", ""),
+                "date": s.get("date", ""),
+                "snippet": s.get("snippet", ""),
+            })
+    return list(groups.values())
+
+
+def get_processed_email_ids(email_ids: list[str]) -> set[str]:
+    processed = set()
+    for email_id in email_ids:
+        snap = _db().collection(SUMMARIES).document(email_id).get()
+        if snap.exists and snap.to_dict().get("processed"):
+            processed.add(email_id)
+    return processed
 
 
 # ── email_groups ──────────────────────────────────────────────────────────────
@@ -111,6 +149,23 @@ def find_nearest_group(embedding: list[float], limit: int = 1) -> dict | None:
     return _strip_vector(data)
 
 
+def delete_all_groups() -> int:
+    docs = list(_db().collection(GROUPS).stream())
+    for doc in docs:
+        doc.reference.delete()
+    return len(docs)
+
+
+def delete_all_summaries() -> int:
+    docs = list(_db().collection(SUMMARIES).stream())
+    for doc in docs:
+        doc.reference.delete()
+    return len(docs)
+
+
 def _strip_vector(doc: dict) -> dict:
     doc.pop("embedding", None)
+    for k, v in doc.items():
+        if hasattr(v, "isoformat"):
+            doc[k] = v.isoformat()
     return doc

@@ -16,3 +16,5 @@ class ActionLog(Base):
     email_subject = Column(String, nullable=True)
     label = Column(String, nullable=True)
     status = Column(String, nullable=False)     # success | dry_run | failed
+    undo_status = Column(String, nullable=True)  # undone | undo_failed | None
+    undone_at = Column(DateTime, nullable=True)

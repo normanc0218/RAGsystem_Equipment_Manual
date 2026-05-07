@@ -32,6 +32,14 @@ class EmailProvider(ABC):
     def remove_label(self, email_id: str, label_name: str) -> bool:
         """Remove a label from an email (undo label)."""
 
+    @abstractmethod
+    def list_user_labels(self) -> list[dict]:
+        """Return all user-created labels as list of {id, name}."""
+
+    @abstractmethod
+    def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
+        """Return emails carrying a specific label."""
+
 
 class GmailProvider(EmailProvider):
     TOKEN_FILE = "gmail_token.json"
@@ -124,7 +132,7 @@ class GmailProvider(EmailProvider):
             kwargs = dict(
                 userId="me",
                 maxResults=min(100, pool_size - len(message_ids)),
-                q="-in:spam -in:trash -category:promotions",
+                q="category:primary",
             )
             if page_token:
                 kwargs["pageToken"] = page_token
@@ -196,6 +204,49 @@ class GmailProvider(EmailProvider):
             ).execute()
         return True
 
+    def list_user_labels(self) -> list[dict]:
+        service = self._get_service()
+        all_labels = service.users().labels().list(userId="me").execute().get("labels", [])
+        system_prefixes = ("INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "UNREAD",
+                           "STARRED", "IMPORTANT", "CATEGORY_", "CHAT")
+        return [
+            {"id": lbl["id"], "name": lbl["name"]}
+            for lbl in all_labels
+            if not any(lbl["id"].startswith(p) for p in system_prefixes)
+        ]
+
+    def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
+        service = self._get_service()
+        message_ids = []
+        page_token = None
+        while len(message_ids) < max_results:
+            kwargs = dict(userId="me", labelIds=[label_id],
+                          maxResults=min(100, max_results - len(message_ids)))
+            if page_token:
+                kwargs["pageToken"] = page_token
+            result = service.users().messages().list(**kwargs).execute()
+            message_ids.extend(result.get("messages", []))
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                break
+
+        emails = []
+        for msg in message_ids:
+            detail = service.users().messages().get(
+                userId="me", id=msg["id"], format="metadata",
+                metadataHeaders=["Subject", "From", "Date"],
+            ).execute()
+            headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
+            emails.append({
+                "id": msg["id"],
+                "thread_id": detail.get("threadId", ""),
+                "subject": headers.get("Subject", "(no subject)"),
+                "from": headers.get("From", ""),
+                "date": headers.get("Date", ""),
+                "snippet": detail.get("snippet", ""),
+            })
+        return emails
+
 
 class FakeProvider(EmailProvider):
     """Returns hardcoded sample emails for local testing without Gmail credentials."""
@@ -240,6 +291,17 @@ class FakeProvider(EmailProvider):
     def remove_label(self, email_id: str, label_name: str) -> bool:
         return True
 
+    def list_user_labels(self) -> list[dict]:
+        return [{"id": "fake-label-work", "name": "Work"}, {"id": "fake-label-billing", "name": "Billing"}]
+
+    def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
+        mapping = {
+            "fake-label-work": ["fake004", "fake005", "fake008"],
+            "fake-label-billing": ["fake002"],
+        }
+        ids = mapping.get(label_id, [])
+        return [e for e in self._EMAILS if e["id"] in ids][:max_results]
+
 
 class YahooProvider(EmailProvider):
     """Stub — replace with IMAP logic when Yahoo support is needed."""
@@ -260,6 +322,12 @@ class YahooProvider(EmailProvider):
         raise NotImplementedError
 
     def remove_label(self, email_id: str, label_name: str) -> bool:
+        raise NotImplementedError
+
+    def list_user_labels(self) -> list[dict]:
+        raise NotImplementedError
+
+    def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
         raise NotImplementedError
 
 

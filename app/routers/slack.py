@@ -76,10 +76,8 @@ def handle_organize(ack, command, client, respond):
 
     try:
         result = _run_agent(
-            f"Fetch my emails. Group related emails by project or topic. "
-            f"Archive promotional emails, newsletters, and automated notifications. "
-            f"Summarize each project group. Report what you did and include the action "
-            f"log IDs so I can undo if needed.{mode_note}",
+            f"Run the master inbox workflow: use LabelSyncAgent if needed, classify unprocessed emails, "
+            f"group them, archive promotions, and summarize the results. Include action log IDs for undo if needed.{mode_note}",
             user_id,
         )
         client.chat_postMessage(channel=channel_id, text=result)
@@ -100,9 +98,8 @@ def handle_digest(ack, command, client, respond):
 
     try:
         result = _run_agent(
-            "Fetch my emails and give me a concise daily digest: "
-            "what project groups exist with their summaries, total email count, "
-            "and any urgent items that need my attention.",
+            "Use DigestAgent to build a concise daily digest of current project groups, "
+            "their summaries, email counts, and any urgent items needing my attention.",
             user_id,
         )
         client.chat_postMessage(

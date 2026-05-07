@@ -150,3 +150,11 @@ def get_logs(limit: int = 100, db: Session = Depends(get_db)):
 def get_groups():
     from app.services.firestore_service import list_groups
     return list_groups()
+
+
+@api.get("/groups/detail")
+def get_groups_detail():
+    from app.services.firestore_service import list_group_details
+    groups = list_group_details()
+    groups.sort(key=lambda g: g.get("last_activity", ""), reverse=True)
+    return groups

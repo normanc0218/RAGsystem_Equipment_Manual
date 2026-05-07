@@ -2,10 +2,14 @@
 .env.example
 email_agent.db
 projects.db
-firestore-key.json.json
-gmail-client-secret.json.json
+firestore-key.json
+gmail-client-secret.json
 gmail_token.json
 __pycache__/
 *.pyc
 *.pyo
 .python-version
+*output*
+*output
+*log*
+*log

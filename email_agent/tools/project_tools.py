@@ -38,6 +38,15 @@ def group_emails(
     )
 
 
+def summarize_groups(group_ids: list[str], tool_context: ToolContext = None) -> dict:
+    """Generate summaries for several groups as a separate summarization sub-agent."""
+    summaries = []
+    for group_id in group_ids:
+        summary = summarize_group(group_id, tool_context=tool_context)
+        summaries.append(summary)
+    return {"summaries": summaries}
+
+
 def summarize_group(group_id: str, tool_context: ToolContext = None) -> dict:
     """Generate an AI summary for a project group and save it to Firestore.
 

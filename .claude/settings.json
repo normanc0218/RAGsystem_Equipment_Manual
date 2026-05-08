@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from email_agent import root_agent; print\\('agents:', [a.name for a in root_agent.sub_agents]\\)\")",
+      "Bash(python -c \"from email_agent import root_agent; print\\('OK'\\)\")",
+      "Bash(mkdir agent_service)",
+      "Bash(touch agent_service/__init__.py)",
+      "Bash(mv app_main.py agent_service/)",
+      "Bash(mv app/ agent_service/)",
+      "Bash(mv email_agent/ agent_service/)",
+      "Bash(python -c \"from agent_service.email_agent.database import init_db; print\\('OK: database import'\\)\")",
+      "Bash(python -c \"from agent_service.app_main import api; print\\('OK'\\)\")",
+      "Bash(python -c \"from agent_service.main import api; print\\('OK'\\)\")",
+      "Bash(python -c \"from agent_service.main import main; from agent_service.server import api; print\\('OK'\\)\")",
+      "Bash(python -c \"from agent_service.app.server import api; print\\('server OK'\\)\")",
+      "Bash(python -c \"from agent_service.main import main; print\\('main OK'\\)\")",
+      "Bash(python -c \"from agent_service.main import runner, session_service; from agent_service.app.server import api; print\\('OK'\\)\")",
+      "Bash(python -c \"from app.server import api; print\\('server OK'\\)\")",
+      "Bash(python -c \"from agent_service.main import runner; print\\('main OK'\\)\")",
+      "Bash(python -c 'import ast, sys *)",
+      "Bash(python -c \"from agent_service.main import initial_state; print\\(initial_state\\)\")",
+      "Bash(python -c \"from agent_service.main import make_initial_state; print\\(make_initial_state\\('U123', 'Alice'\\)\\); print\\(make_initial_state\\('U456'\\) is not make_initial_state\\('U456'\\)\\)\")",
+      "Bash(grep -E \"\\\\.\\(db|json|env|key|pem|p12|token\\)$|firestore|gmail|secret|credential\")"
+    ]
+  }
+}

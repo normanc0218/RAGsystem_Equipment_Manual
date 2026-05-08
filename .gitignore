@@ -1,15 +1,19 @@
+# Secrets & credentials
 .env
-.env.example
-email_agent.db
-projects.db
 firestore-key.json
 gmail-client-secret.json
 gmail_token.json
+
+# Databases & sessions
+*.db
+.adk/
+
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
+
+# Misc
 .python-version
 *output*
 *output
-*log*
-*log

@@ -10,8 +10,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from app.database import Base, engine, init_db
-from app.services.firestore_service import delete_all_groups, delete_all_summaries
+from agent_service.email_agent.database import Base, engine, init_db
+from agent_service.email_agent.services.firestore_service import delete_all_groups, delete_all_summaries
 
 print("Resetting all state...\n")
 
@@ -26,10 +26,10 @@ init_db()
 print("  SQLite: action_logs table reset")
 
 # ── ADK session DB ────────────────────────────────────────────────────────────
-adk_db = "email_agent/.adk/session.db"
+adk_db = "email_agent_sessions.db"
 if os.path.exists(adk_db):
     os.remove(adk_db)
-    print("  ADK: session.db deleted")
+    print("  ADK: email_agent_sessions.db deleted")
 else:
     print("  ADK: no session.db found")
 

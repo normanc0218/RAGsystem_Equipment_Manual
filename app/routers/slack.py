@@ -140,3 +140,44 @@ async def handle_undo(ack, command, respond):
     except Exception as exc:
         logger.exception("Error in /undo")
         await respond(text=f":x: Undo error: {exc}")
+
+
+# ── Direct messages & @mentions ───────────────────────────────────────────────
+
+@app.event("message")
+async def handle_dm(event, client, say):
+    """Handle direct messages sent to the bot."""
+    # Ignore bot messages and message edits/deletes to avoid loops
+    if event.get("bot_id") or event.get("subtype"):
+        return
+
+    user_id = event.get("user")
+    text = event.get("text", "").strip()
+    if not user_id or not text:
+        return
+
+    try:
+        result = await _run_agent(text, user_id)
+        await say(text=result)
+    except Exception as exc:
+        logger.exception("Error handling DM")
+        await say(text=f":x: Error: {exc}")
+
+
+@app.event("app_mention")
+async def handle_mention(event, client, say):
+    """Handle @mentions in channels."""
+    user_id = event.get("user")
+    # Strip the @mention tag from the message text
+    text = event.get("text", "")
+    text = " ".join(w for w in text.split() if not w.startswith("<@")).strip()
+    if not user_id or not text:
+        await say(text="Hi! Try `/organize`, `/digest`, or just ask me anything.")
+        return
+
+    try:
+        result = await _run_agent(text, user_id)
+        await say(text=result)
+    except Exception as exc:
+        logger.exception("Error handling mention")
+        await say(text=f":x: Error: {exc}")

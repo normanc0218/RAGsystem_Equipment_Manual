@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from google.adk.runners import Runner
-from google.adk.sessions import DatabaseSessionService
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from .email_agent import root_agent
@@ -16,9 +16,11 @@ init_db()
 APP_NAME = "email_agent"
 
 # ===== PART 1: Initialize Session Service =====
-session_service = DatabaseSessionService(
-    db_url="sqlite+aiosqlite:///./email_agent_sessions.db"
-)
+# InMemorySessionService avoids SQLite optimistic-lock conflicts during the
+# multi-step ORGANIZE flow (4 sub-agent transfers each writing session state).
+# All durable state lives in Firestore; sessions only carry cheap per-request
+# context (user_id, dry_run) that is recreated on each Slack command.
+session_service = InMemorySessionService()
 
 # ===== PART 2: Define Initial State =====
 def make_initial_state(user_id: str = "unknown", user_name: str = "") -> dict:

@@ -149,71 +149,82 @@ def process_push_notification(payload: dict) -> dict:
     processed = 0
     client = OpenAI()
 
-    # ── New messages: classify → group → label ────────────────────────────────
-    for msg_id in new_message_ids:
-        try:
-            detail = service.users().messages().get(
-                userId="me", id=msg_id, format="metadata",
-                metadataHeaders=["Subject", "From", "Date"],
-            ).execute()
-            headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
-            email = {
-                "id": msg_id,
-                "thread_id": detail.get("threadId", ""),
-                "subject": headers.get("Subject", "(no subject)"),
-                "from": headers.get("From", ""),
-                "date": headers.get("Date", ""),
-                "snippet": detail.get("snippet", ""),
-            }
+    # ── New messages: batch-fetch metadata → batch classify → group + label ───
+    #
+    # How the batch process works:
+    #   Step A — collect all new message IDs from the history response (already done above)
+    #   Step B — fetch metadata for ALL of them in one Gmail batch HTTP request
+    #   Step C — classify ALL emails in one GPT call (same prompt format as /organize)
+    #   Step D — for each classified email: find_or_create_group, mark processed, label
+    #
+    # This means 5 new emails cost 1 Gmail batch call + 1 GPT call instead of 10 calls.
 
+    # Step B — batch metadata fetch
+    new_emails: list[dict] = []
+    if new_message_ids:
+        new_emails = provider._batch_fetch_metadata([{"id": mid} for mid in new_message_ids])
+
+    # Step C — classify all emails in one GPT call
+    if new_emails:
+        lines = [
+            f"{i + 1}. Subject: {e['subject']} | Preview: {e['snippet']}"
+            for i, e in enumerate(new_emails)
+        ]
+        prompt = (
+            "Classify each email into a group name using the format: "
+            "{Company} {Machine/Product} {Problem/Topic} (max 6 words).\n\n"
+            + "\n".join(lines)
+            + '\n\nReturn JSON: {"emails": [{"index": 1, "group_name": "...", '
+            '"should_archive": false, "archive_reason": ""}]}'
+        )
+        cls_by_index: dict[int, dict] = {}
+        try:
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": (
-                        "Classify this email into a group name using the format: "
-                        "{Company} {Machine/Product} {Problem/Topic} (max 6 words). "
+                        "Classify emails into groups using {Company} {Machine/Product} {Problem/Topic}. "
                         "Return only valid JSON."
                     )},
-                    {"role": "user", "content": (
-                        f"Subject: {email['subject']}\n"
-                        f"From: {email['from']}\n"
-                        f"Preview: {email['snippet']}\n\n"
-                        'Return JSON: {"group_name": "...", "should_archive": false, "archive_reason": ""}'
-                    )},
+                    {"role": "user", "content": prompt},
                 ],
                 response_format={"type": "json_object"},
                 temperature=0,
             )
-            cls = json.loads(resp.choices[0].message.content)
-            group_name = cls.get("group_name", "Uncategorized")
-
-            result = find_or_create_group(
-                project_name=group_name,
-                email_ids=[msg_id],
-                sender=email["from"],
-                thread_id=email["thread_id"],
-            )
-            mark_email_processed(
-                email_id=msg_id,
-                group_id=result["group_id"],
-                subject=email["subject"],
-                sender=email["from"],
-                date=email["date"],
-                snippet=email["snippet"],
-            )
-
-            label_name = group_name.replace("/", "-").replace("\\", "-").strip()[:100]
-            if not dry_run:
-                try:
-                    provider.label_email(msg_id, label_name)
-                except Exception as exc:
-                    logger.warning("label_email failed for %s: %s", msg_id, exc)
-
-            processed += 1
-            logger.info("Auto-processed: '%s' → group '%s'", email["subject"], group_name)
-
+            data = json.loads(resp.choices[0].message.content)
+            cls_by_index = {c.get("index"): c for c in data.get("emails", [])}
         except Exception as exc:
-            logger.warning("Failed to process message %s: %s", msg_id, exc)
+            logger.warning("Batch classify failed in push handler: %s", exc)
+
+        # Step D — group, mark, label each email
+        for i, email in enumerate(new_emails):
+            cls = cls_by_index.get(i + 1, {"group_name": "Uncategorized", "should_archive": False})
+            group_name = cls.get("group_name", "Uncategorized")
+            try:
+                result = find_or_create_group(
+                    project_name=group_name,
+                    email_ids=[email["id"]],
+                    sender=email["from"],
+                    thread_id=email["thread_id"],
+                )
+                mark_email_processed(
+                    email_id=email["id"],
+                    group_id=result["group_id"],
+                    subject=email["subject"],
+                    sender=email["from"],
+                    date=email["date"],
+                    snippet=email["snippet"],
+                )
+                label_name = group_name.replace("/", "-").replace("\\", "-").strip()[:100]
+                if not dry_run:
+                    try:
+                        provider.label_email(email["id"], label_name)
+                    except Exception as exc:
+                        logger.warning("label_email failed for %s: %s", email["id"], exc)
+                processed += 1
+                logger.info("Auto-processed: '%s' → group '%s'", email["subject"], group_name)
+            except Exception as exc:
+                logger.warning("Failed to save %s: %s", email["id"], exc)
 
     # ── Manual label changes: sync label name → Firestore group ──────────────
     system_prefixes = ("INBOX", "SENT", "DRAFT", "SPAM", "TRASH",

@@ -83,17 +83,15 @@ def sync_gmail_labels_if_needed(tool_context: ToolContext = None) -> dict:
 
 
 def inbox_processing_agent(
-    max_results: int = 200,
-    random_sample: bool = True,
+    max_results: int = 20,
     tool_context: ToolContext = None,
 ) -> dict:
     """Alias for the inbox processing sub-agent."""
-    return batch_process_emails(max_results=max_results, random_sample=random_sample, tool_context=tool_context)
+    return batch_process_emails(max_results=max_results, tool_context=tool_context)
 
 
 def batch_process_emails(
-    max_results: int = 200,
-    random_sample: bool = True,
+    max_results: int = 20,
     tool_context: ToolContext = None,
 ) -> dict:
     """Phase 2: Fetch and process ALL unprocessed emails in one tool call.
@@ -118,23 +116,36 @@ def batch_process_emails(
     from ..services.email_provider import get_email_provider
     from ..services.firestore_service import get_processed_email_ids, mark_email_processed, update_group
     from ..services.grouping_service import find_or_create_group
+    from ..services.metrics_service import metrics
 
+    metrics.reset()
     user_id = tool_context.state.get("user_id", "unknown") if tool_context else "unknown"
     dry_run = tool_context.state.get("dry_run", True) if tool_context else True
 
     provider = get_email_provider()
-    emails = provider.fetch_emails(max_results=min(max_results, 500), random_sample=random_sample)
+    target = min(max_results, 20)
+    emails: list[dict] = []
+    page_token = None
+    total_scanned = 0
 
-    total_fetched = len(emails)
-    processed_ids = get_processed_email_ids([e["id"] for e in emails])
-    emails = [e for e in emails if e["id"] not in processed_ids]
-    already_processed = total_fetched - len(emails)
+    while len(emails) < target:
+        page, page_token = provider.fetch_emails_page(page_size=50, page_token=page_token)
+        if not page:
+            break
+        total_scanned += len(page)
+        page_processed = get_processed_email_ids([e["id"] for e in page])
+        emails.extend(e for e in page if e["id"] not in page_processed)
+        if not page_token:
+            break
+
+    emails = emails[:target]
+    already_processed = total_scanned - len(emails)
 
     if not emails:
         return {"processed": 0, "grouped": 0, "archived": 0, "already_processed": already_processed,
-                "message": f"All {already_processed} fetched emails are already organised."}
+                "message": f"Scanned {total_scanned} emails — all already organised."}
 
-    logger.info("batch_process_emails: %d new, %d already processed (skipped)", len(emails), already_processed)
+    logger.info("batch_process_emails: %d new out of %d scanned", len(emails), total_scanned)
 
     # ── Step 1: load existing groups from Firestore ───────────────────────────
     from ..services.firestore_service import list_groups
@@ -194,7 +205,9 @@ def batch_process_emails(
                 "- attention_reason: one short sentence explaining why it needs attention"
             )
             try:
-                resp = client.chat.completions.create(
+                resp = metrics.chat(
+                    client,
+                    operation="classify",
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": (
@@ -322,45 +335,67 @@ def batch_process_emails(
                         "log_id": log.id,
                     })
 
-            # Generate summary from full email bodies
-            body_lines = []
-            for email_obj, _ in data["emails"]:
-                try:
-                    body = provider.get_email_body(email_obj["id"])
-                    body_lines.append(
-                        f"Subject: {email_obj['subject']}\nFrom: {email_obj.get('from', '')}\n{body[:1000]}"
-                    )
-                except Exception:
-                    body_lines.append(
-                        f"Subject: {email_obj['subject']}\nFrom: {email_obj.get('from', '')}\n{email_obj.get('snippet', '')}"
-                    )
-            try:
-                summary_resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Summarize these emails in 2-3 sentences. Be concise and actionable."},
-                        {"role": "user", "content": f"Group: {name}\n\n" + "\n\n---\n\n".join(body_lines)},
-                    ],
-                    max_tokens=150,
-                )
-                summary = summary_resp.choices[0].message.content.strip()
-                update_group(result["group_id"], {"summary": summary})
-            except Exception as exc:
-                logger.warning("Summary failed for group %s: %s", name, exc)
-                summary = ""
-
             saved_groups[name] = {
                 "group_id": result["group_id"],
                 "emails": len(email_ids),
                 "archived": sum(1 for _, cls in data["emails"] if cls.get("should_archive")),
                 "action": result["action"],
-                "summary": summary,
+                "summary": "",
             }
     finally:
         db.close()
 
+    # ── Step 5: incremental summary update — one call for all touched groups ────
+    # Uses existing summary (Firestore) + new email snippets (already in memory).
+    # No body re-fetching. Covers both new groups and existing groups with new emails.
+    summary_blocks = []
+    for name, info in saved_groups.items():
+        existing_summary = existing_groups.get(name, "")
+        new_email_lines = [
+            f"- Subject: {e['subject']} | From: {e.get('from', '')} | {e.get('snippet', '')[:150]}"
+            for e, _ in groups_to_save[name]["emails"]
+        ]
+        block = f"Group: {name}\n"
+        if existing_summary:
+            block += f"Current summary: {existing_summary}\n"
+        block += "New emails:\n" + "\n".join(new_email_lines)
+        summary_blocks.append(block)
+
+    if summary_blocks:
+        prompt = (
+            "For each group, write a 1-2 sentence summary.\n"
+            "If a current summary exists, update it to reflect the new emails — "
+            "capture any status changes (resolved, confirmed, escalated, etc.).\n"
+            "If no current summary, write one from the new emails.\n\n"
+            + "\n\n---\n\n".join(summary_blocks)
+            + '\n\nReturn JSON: {"summaries": [{"group": "...", "summary": "..."}]}'
+        )
+        try:
+            resp = metrics.chat(
+                client,
+                operation="summarize",
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Update email group summaries concisely. Return only valid JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=600,
+                temperature=0,
+            )
+            for item in json.loads(resp.choices[0].message.content).get("summaries", []):
+                gname = item.get("group", "")
+                summary = item.get("summary", "")
+                if gname in saved_groups and summary:
+                    saved_groups[gname]["summary"] = summary
+                    update_group(saved_groups[gname]["group_id"], {"summary": summary})
+        except Exception as exc:
+            logger.warning("Incremental summary update failed: %s", exc)
+
+    metrics.log_summary(label=f"batch_process_emails ({len(emails)} emails, {len(saved_groups)} groups)")
+
     result = {
-        "fetched": total_fetched,
+        "scanned": total_scanned,
         "already_processed": already_processed,
         "processed": len(emails),
         "grouped": sum(g["emails"] for g in saved_groups.values()),
@@ -368,13 +403,14 @@ def batch_process_emails(
         "groups": saved_groups,
         "archived_emails": [{"subject": a["subject"], "log_id": a["log_id"]} for a in archived],
         "needs_attention": needs_attention,
+        "api_metrics": metrics.get_summary(),
     }
 
     if tool_context and len(emails) > 0:
         from datetime import datetime
         tool_context.state["interaction_history"] = tool_context.state.get("interaction_history", []) + [{
             "action": "organize",
-            "fetched": total_fetched,
+            "scanned": total_scanned,
             "processed": len(emails),
             "groups": len(saved_groups),
             "archived": len(archived),

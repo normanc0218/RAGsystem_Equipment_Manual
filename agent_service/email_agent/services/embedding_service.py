@@ -14,7 +14,10 @@ def _get_client() -> OpenAI:
 
 def get_embedding(text: str) -> list[float]:
     """Return a 1536-dim embedding for text using text-embedding-3-small."""
-    response = _get_client().embeddings.create(
+    from .metrics_service import metrics
+    response = metrics.embed(
+        _get_client(),
+        operation="embedding:single",
         model="text-embedding-3-small",
         input=text.replace("\n", " "),
     )

@@ -85,11 +85,21 @@ def list_group_details() -> list[dict]:
 
 
 def get_processed_email_ids(email_ids: list[str]) -> set[str]:
+    """Check which email IDs are already processed using batched Firestore reads.
+
+    Firestore get_all() fetches up to 30 document references in one RPC call.
+    Scales automatically — any number of IDs are chunked into ≤30-item batches.
+    """
+    if not email_ids:
+        return set()
+    db = _db()
     processed = set()
-    for email_id in email_ids:
-        snap = _db().collection(SUMMARIES).document(email_id).get()
-        if snap.exists and snap.to_dict().get("processed"):
-            processed.add(email_id)
+    for i in range(0, len(email_ids), 30):
+        chunk = email_ids[i: i + 30]
+        refs = [db.collection(SUMMARIES).document(eid) for eid in chunk]
+        for snap in db.get_all(refs):
+            if snap.exists and snap.to_dict().get("processed"):
+                processed.add(snap.id)
     return processed
 
 

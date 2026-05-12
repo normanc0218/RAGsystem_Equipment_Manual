@@ -1,8 +1,11 @@
 import base64
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class EmailProvider(ABC):
@@ -11,6 +14,10 @@ class EmailProvider(ABC):
     @abstractmethod
     def fetch_emails(self, max_results: int = 200, random_sample: bool = False) -> List[Dict[str, Any]]:
         """Return list of {id, thread_id, subject, from, date, snippet}."""
+
+    @abstractmethod
+    def fetch_emails_page(self, page_size: int = 50, page_token: str | None = None) -> tuple[List[Dict[str, Any]], str | None]:
+        """Fetch one page of inbox emails. Returns (emails, next_page_token)."""
 
     @abstractmethod
     def get_email_body(self, email_id: str) -> str:
@@ -83,6 +90,20 @@ class GmailProvider(EmailProvider):
             client_secret=client_secret,
             scopes=self.SCOPES,
         )
+
+        # Refresh proactively if expired, then persist the new token to disk
+        # so the next startup doesn't hit a 401.
+        if creds.expired and creds.refresh_token:
+            from google.auth.transport.requests import Request
+            creds.refresh(Request())
+            with open(self.TOKEN_FILE, "w") as fh:
+                json.dump({
+                    "token": creds.token,
+                    "refresh_token": creds.refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }, fh)
+
         self._service = build("gmail", "v1", credentials=creds)
         return self._service
 
@@ -121,52 +142,88 @@ class GmailProvider(EmailProvider):
 
     # ── public API ────────────────────────────────────────────────────────────
 
+    def _batch_fetch_metadata(self, message_stubs: list[dict]) -> list[dict]:
+        """Fetch metadata for a list of {id} stubs in one HTTP batch request.
+
+        Gmail batch endpoint packs up to 100 sub-requests into a single
+        multipart/mixed HTTP call, so N emails cost 1 round-trip instead of N.
+        Scales automatically — just pass any number of stubs; this method
+        chunks into ≤100-item batches as needed.
+        """
+        service = self._get_service()
+        results: dict[str, dict] = {}
+
+        def _callback(request_id: str, response, exception):
+            if exception:
+                logger.warning("Batch metadata failed for %s: %s", request_id, exception)
+                return
+            headers = {
+                h["name"]: h["value"]
+                for h in response.get("payload", {}).get("headers", [])
+            }
+            results[request_id] = {
+                "id": request_id,
+                "thread_id": response.get("threadId", ""),
+                "subject": headers.get("Subject", "(no subject)"),
+                "from": headers.get("From", ""),
+                "date": headers.get("Date", ""),
+                "snippet": response.get("snippet", ""),
+            }
+
+        # Gmail batch limit is 100 sub-requests per call
+        for i in range(0, len(message_stubs), 100):
+            chunk = message_stubs[i: i + 100]
+            batch = service.new_batch_http_request(callback=_callback)
+            for stub in chunk:
+                batch.add(
+                    service.users().messages().get(
+                        userId="me", id=stub["id"],
+                        format="metadata",
+                        metadataHeaders=["Subject", "From", "Date"],
+                    ),
+                    request_id=stub["id"],
+                )
+            batch.execute()
+
+        # Preserve original order; skip any stubs that errored
+        return [results[s["id"]] for s in message_stubs if s["id"] in results]
+
     def fetch_emails(self, max_results: int = 200, random_sample: bool = False) -> List[Dict[str, Any]]:
         import random
         service = self._get_service()
 
         pool_size = min(500, max_results * 3) if random_sample else max_results
 
-        message_ids = []
+        message_stubs = []
         page_token = None
-        while len(message_ids) < pool_size:
+        while len(message_stubs) < pool_size:
             kwargs = dict(
                 userId="me",
-                maxResults=min(100, pool_size - len(message_ids)),
+                maxResults=min(100, pool_size - len(message_stubs)),
                 q="category:primary",
             )
             if page_token:
                 kwargs["pageToken"] = page_token
             result = service.users().messages().list(**kwargs).execute()
-            message_ids.extend(result.get("messages", []))
+            message_stubs.extend(result.get("messages", []))
             page_token = result.get("nextPageToken")
             if not page_token:
                 break
 
-        if random_sample and len(message_ids) > max_results:
-            message_ids = random.sample(message_ids, max_results)
+        if random_sample and len(message_stubs) > max_results:
+            message_stubs = random.sample(message_stubs, max_results)
 
-        emails = []
-        for msg in message_ids:
-            detail = service.users().messages().get(
-                userId="me",
-                id=msg["id"],
-                format="metadata",
-                metadataHeaders=["Subject", "From", "Date"],
-            ).execute()
-            headers = {
-                h["name"]: h["value"]
-                for h in detail.get("payload", {}).get("headers", [])
-            }
-            emails.append({
-                "id": msg["id"],
-                "thread_id": detail.get("threadId", ""),
-                "subject": headers.get("Subject", "(no subject)"),
-                "from": headers.get("From", ""),
-                "date": headers.get("Date", ""),
-                "snippet": detail.get("snippet", ""),
-            })
-        return emails
+        return self._batch_fetch_metadata(message_stubs)
+
+    def fetch_emails_page(self, page_size: int = 50, page_token: str | None = None) -> tuple[List[Dict[str, Any]], str | None]:
+        service = self._get_service()
+        kwargs = dict(userId="me", maxResults=min(page_size, 100), q="category:primary")
+        if page_token:
+            kwargs["pageToken"] = page_token
+        result = service.users().messages().list(**kwargs).execute()
+        next_token = result.get("nextPageToken")
+        message_stubs = result.get("messages", [])
+        return self._batch_fetch_metadata(message_stubs), next_token
 
     def get_email_body(self, email_id: str) -> str:
         service = self._get_service()
@@ -277,6 +334,9 @@ class FakeProvider(EmailProvider):
     def fetch_emails(self, max_results: int = 200, random_sample: bool = False) -> List[Dict[str, Any]]:
         return self._EMAILS[:max_results]
 
+    def fetch_emails_page(self, page_size: int = 50, page_token: str | None = None) -> tuple[List[Dict[str, Any]], str | None]:
+        return self._EMAILS[:page_size], None
+
     def get_email_body(self, email_id: str) -> str:
         return self._BODIES.get(email_id, "(no body available)")
 
@@ -310,6 +370,9 @@ class YahooProvider(EmailProvider):
     def fetch_emails(self, max_results: int = 200, random_sample: bool = False) -> List[Dict[str, Any]]:
         raise NotImplementedError("Yahoo provider not yet implemented.")
 
+    def fetch_emails_page(self, page_size: int = 50, page_token: str | None = None) -> tuple[List[Dict[str, Any]], str | None]:
+        raise NotImplementedError
+
     def get_email_body(self, email_id: str) -> str:
         raise NotImplementedError
 
@@ -332,12 +395,18 @@ class YahooProvider(EmailProvider):
         raise NotImplementedError
 
 
+_provider_cache: dict[str, EmailProvider] = {}
+
+
 def get_email_provider() -> EmailProvider:
     provider = os.getenv("EMAIL_PROVIDER", "gmail").lower()
-    if provider == "gmail":
-        return GmailProvider()
-    if provider == "yahoo":
-        return YahooProvider()
-    if provider == "fake":
-        return FakeProvider()
-    raise ValueError(f"Unknown EMAIL_PROVIDER: {provider!r}")
+    if provider not in _provider_cache:
+        if provider == "gmail":
+            _provider_cache[provider] = GmailProvider()
+        elif provider == "yahoo":
+            _provider_cache[provider] = YahooProvider()
+        elif provider == "fake":
+            _provider_cache[provider] = FakeProvider()
+        else:
+            raise ValueError(f"Unknown EMAIL_PROVIDER: {provider!r}")
+    return _provider_cache[provider]

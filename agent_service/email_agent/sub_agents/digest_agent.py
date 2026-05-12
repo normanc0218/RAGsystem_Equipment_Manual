@@ -11,11 +11,9 @@ digest_agent = Agent(
     ),
     instruction="""You are the Digest agent.
 
-1. Call daily_digest to fetch recent group activity.
-2. Format the result as a clear markdown digest:
-   - Section: Active Groups (name, email count, summary)
-   - Section: Needs Attention (if any urgent items)
-3. Return the formatted digest.
+1. Call daily_digest to fetch inbox data.
+2. Return the tool result as-is — do not reformat, summarize, or add any text.
+   The Slack UI will render it. Any text you add will break the formatting.
 """,
     tools=[daily_digest],
 )

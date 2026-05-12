@@ -4,21 +4,28 @@ from ..services.firestore_service import list_groups
 
 
 def daily_digest(tool_context: ToolContext = None) -> dict:
-    """Generate a daily digest of project groups and recent activity."""
+    """Return structured inbox data for the daily digest.
+
+    Returns:
+        Dict with group_count, total_emails, and groups list sorted by last activity.
+    """
     groups = list_groups()
     if not groups:
-        return {"digest": "No email groups have been created yet."}
+        return {"group_count": 0, "total_emails": 0, "groups": []}
 
     sorted_groups = sorted(groups, key=lambda g: g.get("last_activity", ""), reverse=True)
-    lines = []
-    for group in sorted_groups[:10]:
-        name = group.get("name", "Unnamed Group")
-        email_count = group.get("email_count", 0)
-        summary = group.get("summary") or "No summary yet."
-        lines.append(f"*{name}* — {email_count} emails\n{summary}")
+    total_emails = sum(g.get("email_count", 0) for g in groups)
 
-    digest_text = "\n\n".join(lines)
     return {
         "group_count": len(groups),
-        "digest": digest_text,
+        "total_emails": total_emails,
+        "groups": [
+            {
+                "name": g.get("name", "Unnamed"),
+                "email_count": g.get("email_count", 0),
+                "summary": (g.get("summary") or "")[:120],
+                "last_activity": g.get("last_activity", ""),
+            }
+            for g in sorted_groups[:15]
+        ],
     }

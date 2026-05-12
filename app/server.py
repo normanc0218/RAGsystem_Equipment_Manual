@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI):
         renew_if_needed()
     except Exception as exc:
         logger.warning("Gmail watch registration skipped: %s", exc)
+
     yield
 
 

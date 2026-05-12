@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -30,31 +31,41 @@ async def _get_slack_display_name(user_id: str) -> str:
         return ""
 
 
+_user_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id: str) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
+
 async def _run_agent(task: str, user_id: str) -> str:
-    existing = await _session_service.list_sessions(app_name=APP_NAME, user_id=user_id)
-    if existing and existing.sessions:
-        session_id = existing.sessions[0].id
-    else:
-        user_name = await _get_slack_display_name(user_id)
-        session = await _session_service.create_session(
-            app_name=APP_NAME,
+    async with _get_user_lock(user_id):
+        existing = await _session_service.list_sessions(app_name=APP_NAME, user_id=user_id)
+        if existing and existing.sessions:
+            session_id = existing.sessions[0].id
+        else:
+            user_name = await _get_slack_display_name(user_id)
+            session = await _session_service.create_session(
+                app_name=APP_NAME,
+                user_id=user_id,
+                state=make_initial_state(user_id=user_id, user_name=user_name),
+            )
+            session_id = session.id
+
+        response_parts: list[str] = []
+        async for event in _runner.run_async(
             user_id=user_id,
-            state=make_initial_state(user_id=user_id, user_name=user_name),
-        )
-        session_id = session.id
+            session_id=session_id,
+            new_message=types.Content(role="user", parts=[types.Part(text=task)]),
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                for part in event.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        response_parts.append(part.text)
 
-    response_parts: list[str] = []
-    async for event in _runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=types.Content(role="user", parts=[types.Part(text=task)]),
-    ):
-        if event.is_final_response() and event.content and event.content.parts:
-            for part in event.content.parts:
-                if hasattr(part, "text") and part.text:
-                    response_parts.append(part.text)
-
-    return "".join(response_parts) or "Agent completed with no response."
+        return "".join(response_parts) or "Agent completed with no response."
 
 
 # ── FastAPI mount ─────────────────────────────────────────────────────────────
@@ -172,6 +183,82 @@ def _format_organize_result(text: str) -> str:
         lines.append(f"• *{name}* ({info.get('emails', 0)} emails) — {short}")
 
     return "\n".join(lines)
+
+
+def _section(text: str) -> dict:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+_DIVIDER = {"type": "divider"}
+
+
+async def _post_digest_result(client, channel_id: str, data: dict) -> None:
+    """Render a structured daily digest as Slack Block Kit."""
+    group_count = data.get("group_count", 0)
+    total_emails = data.get("total_emails", 0)
+    groups = data.get("groups", [])
+
+    blocks: list[dict] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"📧 Daily Digest — {datetime.now().strftime('%b %d, %Y')}"},
+        },
+        _section(f"*{group_count} groups*  ·  *{total_emails} emails* organised"),
+        _DIVIDER,
+    ]
+
+    if not groups:
+        blocks.append(_section("No groups yet — run `/organize` to get started."))
+        await client.chat_postMessage(channel=channel_id, blocks=blocks, text="Daily Digest")
+        return
+
+    # ── split groups into attention vs normal ────────────────────────────────
+    attention_keywords = ("urgent", "overdue", "required", "action", "overdue", "fault",
+                          "alarm", "escalat", "safety", "deadline", "payment", "error")
+    attention, normal = [], []
+    for g in groups:
+        summary_lower = (g.get("summary") or "").lower()
+        if any(kw in summary_lower for kw in attention_keywords):
+            attention.append(g)
+        else:
+            normal.append(g)
+
+    # ── needs attention section ───────────────────────────────────────────────
+    if attention:
+        lines = ["*⚠️ Needs Attention*"]
+        for g in attention:
+            summary = (g.get("summary") or "").strip()
+            short = (summary[:80] + "…") if len(summary) > 80 else summary
+            count = g.get("email_count", 0)
+            lines.append(f"• *{g['name']}* ({count}) — _{short}_")
+        blocks.append(_section("\n".join(lines)))
+        blocks.append(_DIVIDER)
+
+    # ── all groups section ────────────────────────────────────────────────────
+    group_lines = ["*📁 Groups* _(sorted by recent activity)_"]
+    for g in normal + attention:
+        summary = (g.get("summary") or "").strip()
+        short = (summary[:80] + "…") if len(summary) > 80 else summary
+        count = g.get("email_count", 0)
+        line = f"• *{g['name']}* ({count} email{'s' if count != 1 else ''})"
+        if short:
+            line += f"\n  _{short}_"
+        group_lines.append(line)
+
+    current, chunk_lines = 0, []
+    for line in group_lines:
+        if current + len(line) + 1 > 2900:
+            blocks.append(_section("\n".join(chunk_lines)))
+            chunk_lines, current = [], 0
+        chunk_lines.append(line)
+        current += len(line) + 1
+    if chunk_lines:
+        blocks.append(_section("\n".join(chunk_lines)))
+
+    await client.chat_postMessage(
+        channel=channel_id, blocks=blocks,
+        text=f"Daily Digest — {group_count} groups, {total_emails} emails",
+    )
 
 
 async def _post_organize_result(client, channel_id: str, result: str) -> None:
@@ -363,22 +450,10 @@ async def handle_digest(ack, command, client, respond):
     await respond(text=":inbox_tray: Generating digest…")
 
     try:
-        result = await _run_agent(
-            "Use DigestAgent to build a concise daily digest of current project groups, "
-            "their summaries, email counts, and any urgent items needing my attention.",
-            user_id,
-        )
-        await client.chat_postMessage(
-            channel=channel_id,
-            blocks=[
-                {
-                    "type": "header",
-                    "text": {"type": "plain_text", "text": f"Email Digest — {datetime.now().strftime('%b %d, %Y')}"},
-                },
-                {"type": "section", "text": {"type": "mrkdwn", "text": result}},
-            ],
-            text=result,
-        )
+        import asyncio
+        from agent_service.email_agent.tools.digest_tools import daily_digest
+        data = await asyncio.to_thread(daily_digest)
+        await _post_digest_result(client, channel_id, data)
     except Exception as exc:
         logger.exception("Error in /digest")
         await respond(text=f":x: Digest error: {exc}")

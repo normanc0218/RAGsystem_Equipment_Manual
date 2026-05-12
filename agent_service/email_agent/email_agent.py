@@ -5,8 +5,8 @@ from .sub_agents import (
     casual_agent,
     digest_agent,
     inbox_processing_agent,
+    inbox_query_agent,
     mailbox_sync_agent,
-    summarization_agent,
 )
 
 INSTRUCTION = """You are the master Email Agent. Your ONLY job is to route every message
@@ -18,22 +18,25 @@ for any other workflow.
 - Organise / sort / process / classify emails → ORGANIZE
 - Daily digest / summary of groups → DIGEST
 - Undo an action (/undo <id> or "undo that") → UNDO
+- Questions about inbox stats, group counts, email lists → QUERY
 - Anything else (greetings, thanks, small talk) → CASUAL
 
 ## Step 2 — Execute the workflow
 
 ORGANIZE — run these transfers in order, one at a time:
   1. mailbox_sync_agent
-  2. inbox_processing_agent
-  3. summarization_agent
-  4. audit_agent
-  5. After all four complete, compile and return the final report yourself (see below).
+  2. inbox_processing_agent  (handles classification, grouping, labelling, AND summaries)
+  3. audit_agent
+  4. After all three complete, compile and return the final report yourself (see below).
 
 DIGEST:
   1. digest_agent
 
 UNDO:
   1. audit_agent
+
+QUERY:
+  1. inbox_query_agent
 
 CASUAL:
   1. casual_agent
@@ -78,9 +81,9 @@ root_agent = Agent(
     sub_agents=[
         mailbox_sync_agent,
         inbox_processing_agent,
-        summarization_agent,
         digest_agent,
         audit_agent,
+        inbox_query_agent,
         casual_agent,
     ],
 )

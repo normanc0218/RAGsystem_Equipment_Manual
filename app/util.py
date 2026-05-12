@@ -117,6 +117,36 @@ def get_logs(limit: int = 100, db: Session = Depends(get_db)):
     ]
 
 
+# ── API Metrics ───────────────────────────────────────────────────────────────
+
+@router.get("/metrics")
+def get_metrics():
+    from agent_service.email_agent.services.metrics_service import metrics, _METRICS_FILE
+    import json
+    runs = json.loads(_METRICS_FILE.read_text()) if _METRICS_FILE.exists() else []
+    if not runs:
+        last = metrics.last_run
+        if not last:
+            return {"status": "no run recorded yet — trigger /organize first"}
+        runs = [last]
+    # attach computed totals to each run
+    result = []
+    for run in runs:
+        ops = run.get("operations", {})
+        result.append({
+            "timestamp": run.get("timestamp"),
+            "label": run.get("label"),
+            "summary": {
+                "total_calls": sum(v["calls"] for v in ops.values()),
+                "total_tokens": sum(v["input_tokens"] + v["output_tokens"] for v in ops.values()),
+                "total_cost_usd": round(sum(v["cost_usd"] for v in ops.values()), 6),
+                "total_elapsed_s": round(sum(v["elapsed_s"] for v in ops.values()), 3),
+            },
+            "operations": ops,
+        })
+    return {"runs": result, "total_runs": len(result)}
+
+
 # ── Project Groups (Firestore) ────────────────────────────────────────────────
 
 @router.get("/groups")

@@ -38,24 +38,30 @@ UNDO:
 CASUAL:
   1. casual_agent
 
-## ORGANIZE final report (max 500 words)
+## ORGANIZE final report
 
-After completing all four ORGANIZE steps, write the report directly. Use this structure:
+After all four ORGANIZE steps complete, YOU must write a human-readable plain-text
+report. NEVER return JSON, code blocks, or raw tool output — if you do the UI breaks.
 
-**📊 Organisation Summary**
-- Fetched X emails — Y already organised, Z newly processed
-- N groups created/updated, M emails archived
+Write ONLY this, using Slack mrkdwn (*bold* not **bold**):
 
-**⚠️ Needs Your Attention**
-For each item in needs_attention, one bullet:
-- [Subject] from [sender] — [reason]
-If none, write: No urgent emails found.
+*📊 Summary*
+• [X] emails processed → [N] groups  |  [M] archived
 
-**📁 Groups Overview**
-For each group, one bullet (keep each under 20 words):
-- **Group name** (X emails) — [one-line summary]
+*⚠️ Needs Attention*
+• [Subject] — [one-line reason]
+(write "None" if nothing urgent, max 3 bullets)
 
-Keep the entire report under 500 words. Be brief and factual.
+*📁 Groups*
+• *[Group Name]* ([X] emails) — [one-line summary, max 10 words]
+(max 8 groups)
+
+HARD RULES:
+- NO JSON anywhere in your response
+- NO code blocks (no triple backticks)
+- NO raw data from tool results
+- Total response MUST be under 800 characters
+- If you are unsure what to write, write less — never write more
 
 ## Rules — never break these
 - Never respond to the user yourself except for the ORGANIZE final report.

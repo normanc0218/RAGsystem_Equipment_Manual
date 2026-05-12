@@ -269,6 +269,9 @@ def batch_process_emails(
                 thread_id=thread_ids[0] if thread_ids else "",
             )
 
+            # Sanitise label name: Gmail labels cannot contain these characters
+            label_name = name.replace("/", "-").replace("\\", "-").strip()[:100]
+
             for email, cls in data["emails"]:
                 mark_email_processed(
                     email_id=email["id"],
@@ -278,6 +281,25 @@ def batch_process_emails(
                     date=email.get("date", ""),
                     snippet=email.get("snippet", ""),
                 )
+                # Apply Gmail label so the email is visible in the right group
+                label_status = "dry_run" if dry_run else "success"
+                if not dry_run:
+                    try:
+                        provider.label_email(email["id"], label_name)
+                    except Exception as exc:
+                        logger.warning("label_email failed for %s: %s", email["id"], exc)
+                        label_status = "error"
+                log = ActionLog(
+                    user=user_id,
+                    action="label",
+                    email_id=email["id"],
+                    email_subject=email["subject"],
+                    label=label_name,
+                    status=label_status,
+                )
+                db.add(log)
+                db.commit()
+
                 # Archive emails whose project/thread is done
                 if cls.get("should_archive"):
                     status = "dry_run" if dry_run else "success"

@@ -20,7 +20,8 @@
       "Bash(python -c 'import ast, sys *)",
       "Bash(python -c \"from agent_service.main import initial_state; print\\(initial_state\\)\")",
       "Bash(python -c \"from agent_service.main import make_initial_state; print\\(make_initial_state\\('U123', 'Alice'\\)\\); print\\(make_initial_state\\('U456'\\) is not make_initial_state\\('U456'\\)\\)\")",
-      "Bash(grep -E \"\\\\.\\(db|json|env|key|pem|p12|token\\)$|firestore|gmail|secret|credential\")"
+      "Bash(grep -E \"\\\\.\\(db|json|env|key|pem|p12|token\\)$|firestore|gmail|secret|credential\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

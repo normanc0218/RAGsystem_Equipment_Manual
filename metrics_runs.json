@@ -1,0 +1,342 @@
+[
+  {
+    "timestamp": "2026-05-13T14:08:35.701211+00:00",
+    "label": "batch_process_emails (20 emails, 18 groups)",
+    "operations": {
+      "classify:gpt-4o-mini": {
+        "calls": 8,
+        "input_tokens": 8009,
+        "output_tokens": 1026,
+        "cost_usd": 0.001817,
+        "elapsed_s": 25.603
+      },
+      "embedding:single:text-embedding-3-small": {
+        "calls": 17,
+        "input_tokens": 123,
+        "output_tokens": 0,
+        "cost_usd": 2e-06,
+        "elapsed_s": 7.547
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1944,
+        "output_tokens": 600,
+        "cost_usd": 0.000652,
+        "elapsed_s": 9.406
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T17:03:15.795902+00:00",
+    "label": "batch_process_emails (20 emails, 11 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 21,
+        "input_tokens": 1420,
+        "output_tokens": 0,
+        "cost_usd": 2.8e-05,
+        "elapsed_s": 15.805
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T17:31:48.683312+00:00",
+    "label": "finalize_email_processing (20 emails, 15 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 27,
+        "input_tokens": 1454,
+        "output_tokens": 0,
+        "cost_usd": 2.9e-05,
+        "elapsed_s": 8.262
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1984,
+        "output_tokens": 600,
+        "cost_usd": 0.000658,
+        "elapsed_s": 8.619
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T17:46:37.705640+00:00",
+    "label": "finalize_email_processing (20 emails, 13 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 19,
+        "input_tokens": 871,
+        "output_tokens": 0,
+        "cost_usd": 1.7e-05,
+        "elapsed_s": 6.915
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1746,
+        "output_tokens": 550,
+        "cost_usd": 0.000592,
+        "elapsed_s": 13.407
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T19:54:06.861581+00:00",
+    "label": "finalize_email_processing (20 emails, 15 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 23,
+        "input_tokens": 1030,
+        "output_tokens": 0,
+        "cost_usd": 2.1e-05,
+        "elapsed_s": 11.967
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1878,
+        "output_tokens": 600,
+        "cost_usd": 0.000642,
+        "elapsed_s": 7.788
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T19:58:39.045372+00:00",
+    "label": "finalize_email_processing (20 emails, 13 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 21,
+        "input_tokens": 858,
+        "output_tokens": 0,
+        "cost_usd": 1.7e-05,
+        "elapsed_s": 4.981
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1872,
+        "output_tokens": 600,
+        "cost_usd": 0.000641,
+        "elapsed_s": 16.436
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T20:05:19.709349+00:00",
+    "label": "finalize_email_processing (20 emails, 13 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 21,
+        "input_tokens": 757,
+        "output_tokens": 0,
+        "cost_usd": 1.5e-05,
+        "elapsed_s": 5.882
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1761,
+        "output_tokens": 600,
+        "cost_usd": 0.000624,
+        "elapsed_s": 8.003
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T20:16:19.715187+00:00",
+    "label": "finalize_email_processing (20 emails, 12 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 17,
+        "input_tokens": 606,
+        "output_tokens": 0,
+        "cost_usd": 1.2e-05,
+        "elapsed_s": 5.317
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1787,
+        "output_tokens": 600,
+        "cost_usd": 0.000628,
+        "elapsed_s": 9.713
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T20:42:52.309316+00:00",
+    "label": "finalize_email_processing (20 emails, 11 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 22,
+        "input_tokens": 1821,
+        "output_tokens": 0,
+        "cost_usd": 3.6e-05,
+        "elapsed_s": 7.355
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 2167,
+        "output_tokens": 396,
+        "cost_usd": 0.000563,
+        "elapsed_s": 8.39
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T20:44:47.879291+00:00",
+    "label": "finalize_email_processing (20 emails, 14 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 25,
+        "input_tokens": 1077,
+        "output_tokens": 0,
+        "cost_usd": 2.2e-05,
+        "elapsed_s": 5.734
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1791,
+        "output_tokens": 600,
+        "cost_usd": 0.000629,
+        "elapsed_s": 12.0
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T20:51:19.269659+00:00",
+    "label": "finalize_email_processing (8 emails, 2 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 2,
+        "input_tokens": 5,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "elapsed_s": 0.578
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 322,
+        "output_tokens": 123,
+        "cost_usd": 0.000122,
+        "elapsed_s": 3.133
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T21:05:18.695613+00:00",
+    "label": "finalize_email_processing (20 emails, 13 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 24,
+        "input_tokens": 1027,
+        "output_tokens": 0,
+        "cost_usd": 2.1e-05,
+        "elapsed_s": 7.431
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1801,
+        "output_tokens": 600,
+        "cost_usd": 0.00063,
+        "elapsed_s": 10.989
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T21:17:20.426591+00:00",
+    "label": "finalize_email_processing (20 emails, 13 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 19,
+        "input_tokens": 1031,
+        "output_tokens": 0,
+        "cost_usd": 2.1e-05,
+        "elapsed_s": 7.023
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1778,
+        "output_tokens": 596,
+        "cost_usd": 0.000624,
+        "elapsed_s": 8.85
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T21:37:57.434298+00:00",
+    "label": "finalize_email_processing (20 emails, 11 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 18,
+        "input_tokens": 686,
+        "output_tokens": 0,
+        "cost_usd": 1.4e-05,
+        "elapsed_s": 6.723
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1828,
+        "output_tokens": 541,
+        "cost_usd": 0.000599,
+        "elapsed_s": 7.961
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T21:42:54.787551+00:00",
+    "label": "finalize_email_processing (20 emails, 11 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 17,
+        "input_tokens": 604,
+        "output_tokens": 0,
+        "cost_usd": 1.2e-05,
+        "elapsed_s": 3.718
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1779,
+        "output_tokens": 568,
+        "cost_usd": 0.000608,
+        "elapsed_s": 12.841
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T21:56:27.667418+00:00",
+    "label": "finalize_email_processing (20 emails, 15 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 22,
+        "input_tokens": 819,
+        "output_tokens": 0,
+        "cost_usd": 1.6e-05,
+        "elapsed_s": 10.558
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1954,
+        "output_tokens": 600,
+        "cost_usd": 0.000653,
+        "elapsed_s": 8.583
+      }
+    }
+  },
+  {
+    "timestamp": "2026-05-14T22:00:16.797886+00:00",
+    "label": "finalize_email_processing (20 emails, 12 groups)",
+    "operations": {
+      "embedding:single:text-embedding-3-small": {
+        "calls": 19,
+        "input_tokens": 620,
+        "output_tokens": 0,
+        "cost_usd": 1.2e-05,
+        "elapsed_s": 4.201
+      },
+      "summarize:gpt-4o-mini": {
+        "calls": 1,
+        "input_tokens": 1850,
+        "output_tokens": 593,
+        "cost_usd": 0.000633,
+        "elapsed_s": 13.232
+      }
+    }
+  }
+]

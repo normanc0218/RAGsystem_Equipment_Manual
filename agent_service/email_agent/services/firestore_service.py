@@ -172,6 +172,29 @@ def find_nearest_group(embedding: list[float], limit: int = 1) -> dict | None:
     return _strip_vector(data)
 
 
+def find_nearest_group_top_k(embedding: list[float], k: int = 3) -> list[dict]:
+    """Return up to k nearest groups by cosine similarity, each with a similarity field."""
+    results = (
+        _db()
+        .collection(GROUPS)
+        .find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(embedding),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=k,
+            distance_result_field="cosine_distance",
+        )
+        .get()
+    )
+    out = []
+    for doc in results:
+        data = doc.to_dict()
+        distance = data.pop("cosine_distance", 1.0)
+        data["similarity"] = round(1.0 - distance, 4)
+        out.append(_strip_vector(data))
+    return out
+
+
 def delete_all_groups() -> int:
     docs = list(_db().collection(GROUPS).stream())
     for doc in docs:

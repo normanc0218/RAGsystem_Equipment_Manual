@@ -1,7 +1,8 @@
 from .email_tools import (
     archive_email,
     batch_process_emails,
-    inbox_processing_agent,
+    pre_process_emails,
+    finalize_email_processing,
     sync_gmail_labels,
     sync_gmail_labels_if_needed,
 )
@@ -13,7 +14,8 @@ __all__ = [
     "sync_gmail_labels",
     "sync_gmail_labels_if_needed",
     "batch_process_emails",
-    "inbox_processing_agent",
+    "pre_process_emails",
+    "finalize_email_processing",
     "archive_email",
     "group_emails",
     "summarize_group",

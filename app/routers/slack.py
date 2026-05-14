@@ -54,7 +54,7 @@ async def _run_agent(task: str, user_id: str) -> str:
             )
             session_id = session.id
 
-        response_parts: list[str] = []
+        last_response = ""
         async for event in _runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -63,9 +63,9 @@ async def _run_agent(task: str, user_id: str) -> str:
             if event.is_final_response() and event.content and event.content.parts:
                 for part in event.content.parts:
                     if hasattr(part, "text") and part.text:
-                        response_parts.append(part.text)
+                        last_response = part.text  # last final response wins
 
-        return "".join(response_parts) or "Agent completed with no response."
+        return last_response or "Agent completed with no response."
 
 
 # ── FastAPI mount ─────────────────────────────────────────────────────────────
@@ -185,6 +185,85 @@ def _format_organize_result(text: str) -> str:
     return "\n".join(lines)
 
 
+def _parse_organize_report(text: str) -> dict:
+    """Parse a Slack-style organize report into structured sections."""
+    import re
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    report = {"summary": [], "needs_attention": [], "groups": [], "raw": text}
+    section = None
+
+    heading_map = {
+        re.compile(r"^\*?\s*📊\s*Summary\s*\*?$", re.IGNORECASE): "summary",
+        re.compile(r"^\*?\s*⚠️\s*Needs\s+Attention\s*\*?$", re.IGNORECASE): "needs_attention",
+        re.compile(r"^\*?\s*📁\s*Groups\s*\*?$", re.IGNORECASE): "groups",
+        re.compile(r"^\*?\s*📦\s*Archived\s*\*?$", re.IGNORECASE): "archived",
+    }
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        matched = False
+        for pattern, name in heading_map.items():
+            if pattern.match(stripped):
+                section = name
+                if name == "archived":
+                    report.setdefault("archived", [])
+                matched = True
+                break
+        if matched:
+            continue
+
+        if stripped.startswith("•") or stripped.startswith("-"):
+            content = stripped[1:].strip()
+        else:
+            content = stripped
+
+        if section:
+            if section == "summary" and not content.startswith("•"):
+                report[section].append(content)
+            else:
+                report.setdefault(section, []).append(content)
+        else:
+            report.setdefault("other", []).append(content)
+
+    # If the parser found nothing useful, preserve raw text in summary for fallback.
+    if not any(report.get(k) for k in ("summary", "needs_attention", "groups")):
+        report["summary"] = [text.strip()]
+
+    return report
+
+
+def _create_mrkdwn_blocks(title: str, lines: list[str]) -> list[dict]:
+    if not lines:
+        return []
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*"}}]
+    text = "\n".join(f"• {line}" for line in lines)
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+    return blocks
+
+
+def _chunked_sections(title: str, lines: list[str], max_chars: int = 2800) -> list[dict]:
+    blocks = []
+    if not lines:
+        return blocks
+    chunk = []
+    current = 0
+    for line in lines:
+        if current + len(line) + 1 > max_chars and chunk:
+            blocks.extend(_create_mrkdwn_blocks(title, chunk))
+            blocks.append(_DIVIDER)
+            chunk = []
+            current = 0
+        chunk.append(line)
+        current += len(line) + 1
+    if chunk:
+        blocks.extend(_create_mrkdwn_blocks(title, chunk))
+    return blocks
+
+
 def _section(text: str) -> dict:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
 
@@ -264,14 +343,35 @@ async def _post_digest_result(client, channel_id: str, data: dict) -> None:
 async def _post_organize_result(client, channel_id: str, result: str) -> None:
     """Post the organise report as Block Kit. Falls back to formatting raw JSON if needed."""
     formatted = _format_organize_result(result)
-    blocks = [
+    parsed = _parse_organize_report(formatted)
+
+    blocks: list[dict] = [
         {
             "type": "header",
             "text": {"type": "plain_text", "text": f"✉️ Inbox Organised — {datetime.now().strftime('%b %d, %Y')}"},
         }
     ]
-    for chunk in [formatted[i:i + 2900] for i in range(0, len(formatted), 2900)]:
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": chunk}})
+
+    if parsed["summary"]:
+        blocks.extend(_create_mrkdwn_blocks("📊 Summary", parsed["summary"]))
+        blocks.append(_DIVIDER)
+
+    if parsed["needs_attention"]:
+        blocks.extend(_create_mrkdwn_blocks("⚠️ Needs Attention", parsed["needs_attention"]))
+        blocks.append(_DIVIDER)
+    else:
+        blocks.append(_section("*⚠️ Needs Attention*\n• None"))
+        blocks.append(_DIVIDER)
+
+    if parsed["groups"]:
+        blocks.extend(_chunked_sections("📁 Groups", parsed["groups"]))
+    else:
+        blocks.append(_section("*📁 Groups*\n• None"))
+
+    # Fallback: if parsing failed and blocks are minimal, include raw text as a final section.
+    if len(blocks) <= 2:
+        blocks.append(_section(formatted))
+
     await client.chat_postMessage(channel=channel_id, blocks=blocks, text=formatted[:500])
 
 

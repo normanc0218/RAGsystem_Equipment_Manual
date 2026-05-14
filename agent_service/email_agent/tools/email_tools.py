@@ -82,46 +82,42 @@ def sync_gmail_labels_if_needed(tool_context: ToolContext = None) -> dict:
     return {"labels_synced": 0, "message": "Existing label groups already seeded; no sync needed."}
 
 
-def inbox_processing_agent(
+def pre_process_emails(
     max_results: int = 20,
     tool_context: ToolContext = None,
 ) -> dict:
-    """Alias for the inbox processing sub-agent."""
-    return batch_process_emails(max_results=max_results, tool_context=tool_context)
+    """Stages 1-3 of the email processing pipeline: fetch, filter, and pre-cluster emails.
 
+    Stage 1 — User-labelled: emails already labelled by the user keep their label as the group
+              name and are ingested into the vector DB.
+    Stage 2 — Template detection: automated/template emails (low entropy, keyword signals) are
+              routed to "Misc" and marked for archiving.
+    Stage 3 — Thread grouping: emails sharing a thread_id within this batch are grouped together.
 
-def batch_process_emails(
-    max_results: int = 20,
-    tool_context: ToolContext = None,
-) -> dict:
-    """Phase 2: Fetch and process ALL unprocessed emails in one tool call.
+    Emails that pass all three stages are stored in session state (emails_to_cluster) for
+    the email_grouping_agent to handle in Stage 4.
 
-    Python loops through every email — the LLM never has to iterate.
-    Emails are classified in batches of 20, then aggregated by group_name
-    before saving to Firestore (so same-named groups are never split).
-    Summaries are generated from already-fetched data — no re-fetch needed.
+    If GROUPING_MODE=vector, Stage 4 is also run here using pure embedding similarity
+    (no LLM), and the result is pre-populated into grouping_assignments so the grouping
+    agent can be skipped.
 
     Args:
-        max_results: Max emails to fetch (default 200, max 500).
-        random_sample: When True, fetch a larger pool and sample randomly.
+        max_results: Maximum emails to fetch and process (capped at 20).
         tool_context: Injected by ADK — do not pass manually.
 
     Returns:
-        Dict with total processed, groups, archived emails, and summaries.
+        Dict with scanned, already_processed, stage1/2/3 counts, remaining (Stage 4 input).
     """
-    from openai import OpenAI
+    import os
 
-    from ..database import SessionLocal
-    from ..models.action_log import ActionLog
     from ..services.email_provider import get_email_provider
-    from ..services.firestore_service import get_processed_email_ids, mark_email_processed, update_group
-    from ..services.grouping_service import find_or_create_group
+    from ..services.embedding_service import get_embedding
+    from ..services.firestore_service import get_processed_email_ids
+    from ..services.grouping_service import cluster_by_vector, _clean_subject
     from ..services.metrics_service import metrics
+    from ..services.template_service import is_template_email
 
     metrics.reset()
-    user_id = tool_context.state.get("user_id", "unknown") if tool_context else "unknown"
-    dry_run = tool_context.state.get("dry_run", True) if tool_context else True
-
     provider = get_email_provider()
     target = min(max_results, 20)
     emails: list[dict] = []
@@ -142,117 +138,183 @@ def batch_process_emails(
     already_processed = total_scanned - len(emails)
 
     if not emails:
-        return {"processed": 0, "grouped": 0, "archived": 0, "already_processed": already_processed,
-                "message": f"Scanned {total_scanned} emails — all already organised."}
+        if tool_context:
+            tool_context.state["_all_emails"] = []
+            tool_context.state["email_pre_cls"] = {}
+            tool_context.state["emails_to_cluster"] = []
+            tool_context.state["_total_scanned"] = total_scanned
+            tool_context.state["_already_processed"] = already_processed
+        return {
+            "scanned": total_scanned,
+            "already_processed": already_processed,
+            "remaining": 0,
+            "message": f"Scanned {total_scanned} emails — all already organised.",
+        }
 
-    logger.info("batch_process_emails: %d new out of %d scanned", len(emails), total_scanned)
+    logger.info("pre_process_emails: %d new out of %d scanned", len(emails), total_scanned)
 
-    # ── Step 1: load existing groups from Firestore ───────────────────────────
-    from ..services.firestore_service import list_groups
-    existing_groups = {g["name"]: g.get("summary", "") for g in list_groups()}
+    grouping_mode = os.getenv("GROUPING_MODE", "adk")  # "adk" | "vector" | "llm"
+    user_label_map = {lbl["id"]: lbl["name"] for lbl in provider.list_user_labels()}
+    email_pre_cls: dict[str, dict] = {}
 
-    # ── Step 2: pre-group by sender domain, classify semantically within each ─
-    client = OpenAI()
-
-    domain_buckets: dict[str, list[dict]] = {}
+    # ── Stage 1: user-labelled emails ────────────────────────────────────────
+    remaining = []
     for email in emails:
-        domain = _sender_domain(email.get("from", ""))
-        domain_buckets.setdefault(domain, []).append(email)
+        names = [user_label_map[lid] for lid in email.get("label_ids", []) if lid in user_label_map]
+        if names:
+            emb = get_embedding(f"{email['subject']} {email.get('snippet', '')}")
+            email_pre_cls[email["id"]] = {
+                "group_name": names[0],
+                "should_archive": False,
+                "archive_reason": "already labelled by user",
+                "needs_attention": False,
+                "attention_reason": "",
+                "_embedding": emb,
+            }
+        else:
+            remaining.append(email)
 
-    email_cls: dict[str, dict] = {}  # email_id → classification
+    stage1_count = len(email_pre_cls)
+    logger.info("Stage 1 (user-labelled): %d  remaining: %d", stage1_count, len(remaining))
 
-    for domain, bucket in domain_buckets.items():
-        # Seed only with groups whose name was produced while processing this domain
-        # (existing_groups from Firestore is kept separate to avoid cross-domain noise)
-        domain_existing = {k: v for k, v in existing_groups.items()}
+    # ── Stage 2: template / automated email detection ────────────────────────
+    primary = []
+    for email in remaining:
+        if is_template_email(email.get("snippet", ""), email.get("subject", "")):
+            email_pre_cls[email["id"]] = {
+                "group_name": "Misc",
+                "should_archive": True,
+                "archive_reason": "template/automated email",
+                "needs_attention": False,
+                "attention_reason": "",
+            }
+        else:
+            primary.append(email)
 
-        for i in range(0, len(bucket), BATCH_SIZE):
-            batch = bucket[i: i + BATCH_SIZE]
-            lines = [
-                f"{j + 1}. Subject: {e['subject']} | Preview: {e['snippet']}"
-                for j, e in enumerate(batch)
-            ]
-            existing_str = ""
-            if domain_existing:
-                existing_str = "\n\nExisting groups (reuse exact name if the email fits):\n" + \
-                    "\n".join(f"- {name}: {desc}" for name, desc in domain_existing.items())
+    stage2_count = len(remaining) - len(primary)
+    logger.info("Stage 2 (template→Misc): %d  remaining: %d", stage2_count, len(primary))
 
-            prompt = (
-                f"These emails are all from the domain @{domain}.\n"
-                "Classify each one into a sub-group based ONLY on the semantic meaning "
-                "of the subject and body — do NOT use the sender domain as the group name.\n\n"
-                + "\n".join(lines)
-                + existing_str
-                + "\n\nReturn JSON:\n"
-                '{"emails": [{"index": 1, "group_name": "Company Machine Problem", '
-                '"should_archive": false, "archive_reason": "", '
-                '"needs_attention": false, "attention_reason": ""}]}\n'
-                "Rules:\n"
-                "- group_name MUST follow the format: {Company} {Machine/Product} {Problem/Topic}\n"
-                "  Examples: 'Siemens S7-1500 Overheating', 'ABB Robot Arm Calibration Fault',\n"
-                "            'Fanuc CNC Spindle Error', 'Bosch Pump Pressure Drop'\n"
-                "- Include as many of the three parts as the email makes clear\n"
-                "- If no machine/product is mentioned, use: {Company} {Topic}, e.g. 'Siemens Billing'\n"
-                "- If an existing group fits exactly, use its exact name\n"
-                "- Max 6 words\n"
-                "- should_archive=true ONLY if clearly done and needs no action "
-                "(paid invoice, resolved ticket, read-only notification)\n"
-                "- should_archive=false if the email may need a reply or follow-up\n"
-                "- Promotions/newsletters: group as 'Promotions' or 'Newsletters', "
-                "archive only if clearly one-way\n"
-                "- needs_attention=true if the email requires urgent action or a reply "
-                "(fault alarm, overdue payment, deadline, escalation, safety issue)\n"
-                "- attention_reason: one short sentence explaining why it needs attention"
-            )
-            try:
-                resp = metrics.chat(
-                    client,
-                    operation="classify",
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": (
-                            "Classify emails into project groups using the format: "
-                            "{Company} {Machine/Product} {Problem/Topic}. "
-                            "Extract the company name, equipment or product model, and the issue or topic "
-                            "from the subject and body. Reuse existing group names when the topic matches. "
-                            "Return only valid JSON."
-                        )},
-                        {"role": "user", "content": prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                )
-                data = json.loads(resp.choices[0].message.content)
-                cls_by_index = {c.get("index"): c for c in data.get("emails", [])}
-                for j, email in enumerate(batch):
-                    cls = cls_by_index.get(j + 1, {
-                        "group_name": "Uncategorized", "should_archive": False, "archive_reason": ""
-                    })
-                    email_cls[email["id"]] = cls
-                    name = cls.get("group_name", "")
-                    if name and name not in domain_existing:
-                        domain_existing[name] = ""
-                        existing_groups[name] = ""
-            except Exception as exc:
-                logger.warning("Classification batch domain=%s batch=%d failed: %s", domain, i // BATCH_SIZE, exc)
-                for email in batch:
-                    email_cls[email["id"]] = {
-                        "group_name": "Uncategorized", "should_archive": False, "archive_reason": ""
-                    }
+    # ── Stage 3: thread grouping ──────────────────────────────────────────────
+    thread_map: dict[str, list[dict]] = {}
+    to_cluster: list[dict] = []
+    for email in primary:
+        tid = email.get("thread_id", "")
+        if tid:
+            thread_map.setdefault(tid, []).append(email)
+        else:
+            to_cluster.append(email)
 
-    # ── Step 3: aggregate ALL emails by group_name ───────────────────────────
+    for tid, thread_emails in thread_map.items():
+        if len(thread_emails) >= 2:
+            name = _clean_subject(thread_emails[0]["subject"])
+            for email in thread_emails:
+                email_pre_cls[email["id"]] = {
+                    "group_name": name,
+                    "should_archive": False,
+                    "archive_reason": "",
+                    "needs_attention": False,
+                    "attention_reason": "",
+                }
+        else:
+            to_cluster.extend(thread_emails)
+
+    stage3_count = len(primary) - len(to_cluster)
+    logger.info("Stage 3 (thread groups): %d  Stage 4 input: %d", stage3_count, len(to_cluster))
+
+    # ── Stage 4 fast-path: vector mode (no LLM, no ADK agent) ────────────────
+    # When GROUPING_MODE=vector, run pure embedding clustering here and pre-populate
+    # grouping_assignments so finalize_email_processing can proceed directly.
+    grouping_assignments: dict[str, dict] = {}
+    if to_cluster and grouping_mode == "vector":
+        vector_cls = cluster_by_vector(to_cluster)
+        grouping_assignments.update(vector_cls)
+        logger.info("Stage 4 (vector fast-path): %d emails clustered", len(vector_cls))
+
+    if tool_context:
+        tool_context.state["_all_emails"] = emails
+        tool_context.state["email_pre_cls"] = email_pre_cls
+        # In vector mode assignments are already computed — signal grouping agent to skip
+        tool_context.state["emails_to_cluster"] = [] if grouping_assignments else to_cluster
+        tool_context.state["_total_scanned"] = total_scanned
+        tool_context.state["_already_processed"] = already_processed
+        if grouping_assignments:
+            tool_context.state["grouping_assignments"] = grouping_assignments
+
+    return {
+        "scanned": total_scanned,
+        "already_processed": already_processed,
+        "stage1_user_labelled": stage1_count,
+        "stage2_templates": stage2_count,
+        "stage3_thread_grouped": stage3_count,
+        "remaining": len(to_cluster) if grouping_mode != "vector" else 0,
+        "grouping_mode": grouping_mode,
+    }
+
+
+def finalize_email_processing(tool_context: ToolContext = None) -> dict:
+    """Steps 5-6: save groups to Firestore, apply Gmail labels, archive, and summarize.
+
+    Reads from session state (written by pre_process_emails + email_grouping_agent):
+      _all_emails, email_pre_cls, grouping_assignments, _total_scanned, _already_processed.
+
+    Merges Stage 1-3 pre-classifications with Stage 4 grouping assignments, then:
+    - Creates or merges groups in Firestore.
+    - Marks each email as processed.
+    - Applies Gmail labels (skipped in dry_run mode).
+    - Archives completed emails (skipped in dry_run mode).
+    - Generates one-call incremental group summaries via GPT.
+
+    Args:
+        tool_context: Injected by ADK — do not pass manually.
+
+    Returns:
+        Dict with processed, grouped, archived, groups, needs_attention, api_metrics.
+    """
+    from openai import OpenAI
+
+    from ..database import SessionLocal
+    from ..models.action_log import ActionLog
+    from ..services.email_provider import get_email_provider
+    from ..services.firestore_service import get_processed_email_ids, mark_email_processed, update_group, list_groups
+    from ..services.grouping_service import find_or_create_group
+    from ..services.metrics_service import metrics
+
+    user_id = tool_context.state.get("user_id", "unknown") if tool_context else "unknown"
+    dry_run = tool_context.state.get("dry_run", True) if tool_context else True
+
+    emails: list[dict] = tool_context.state.get("_all_emails", []) if tool_context else []
+    email_pre_cls: dict = tool_context.state.get("email_pre_cls", {}) if tool_context else {}
+    grouping_assignments: dict = tool_context.state.get("grouping_assignments", {}) if tool_context else {}
+    total_scanned: int = tool_context.state.get("_total_scanned", 0) if tool_context else 0
+    already_processed: int = tool_context.state.get("_already_processed", 0) if tool_context else 0
+
+    if not emails:
+        return {"processed": 0, "grouped": 0, "archived": 0, "already_processed": already_processed,
+                "message": "No emails to finalize — run pre_process_emails first."}
+
+    # Merge pre-classifications with Stage 4 grouping assignments
+    email_cls: dict[str, dict] = {**email_pre_cls}
+    for eid, cls in grouping_assignments.items():
+        if eid not in email_cls:
+            email_cls[eid] = cls
+
+    # Fallback: any email not yet classified
+    for email in emails:
+        if email["id"] not in email_cls:
+            email_cls[email["id"]] = {"group_name": "Uncategorized", "should_archive": False, "archive_reason": ""}
+
+    existing_groups = {g["name"]: g.get("summary", "") for g in list_groups()}
+    provider = get_email_provider()
+
+    # ── Aggregate by group_name ───────────────────────────────────────────────
     groups_to_save: dict[str, dict] = {}
     needs_attention: list[dict] = []
 
     for email in emails:
-        cls = email_cls.get(email["id"], {"group_name": "Uncategorized", "should_archive": False, "archive_reason": ""})
+        cls = email_cls[email["id"]]
         name = cls.get("group_name", "Uncategorized")
         if name not in groups_to_save:
-            groups_to_save[name] = {
-                "emails": [],
-                "senders": set(),
-                "thread_ids": set(),
-            }
+            groups_to_save[name] = {"emails": []}
         groups_to_save[name]["emails"].append((email, cls))
         if cls.get("needs_attention"):
             needs_attention.append({
@@ -262,7 +324,7 @@ def batch_process_emails(
                 "reason": cls.get("attention_reason", ""),
             })
 
-    # ── Step 4: save groups + archive done emails ─────────────────────────────
+    # ── Step 5: save groups + archive ────────────────────────────────────────
     saved_groups: dict[str, dict] = {}
     archived: list[dict] = []
     db = SessionLocal()
@@ -273,16 +335,19 @@ def batch_process_emails(
             email_ids = [e["id"] for e in email_objs]
             senders = list({e.get("from", "") for e in email_objs})
             thread_ids = list({e.get("thread_id", "") for e in email_objs if e.get("thread_id")})
-
+            pre_emb = next(
+                (email_cls[e["id"]].get("_embedding") for e, _ in data["emails"]
+                 if email_cls.get(e["id"], {}).get("_embedding")),
+                None,
+            )
             result = find_or_create_group(
                 project_name=name,
                 email_ids=email_ids,
                 description="",
                 sender=senders[0] if senders else "",
                 thread_id=thread_ids[0] if thread_ids else "",
+                embedding=pre_emb,
             )
-
-            # Sanitise label name: Gmail labels cannot contain these characters
             label_name = name.replace("/", "-").replace("\\", "-").strip()[:100]
 
             for email, cls in data["emails"]:
@@ -294,7 +359,6 @@ def batch_process_emails(
                     date=email.get("date", ""),
                     snippet=email.get("snippet", ""),
                 )
-                # Apply Gmail label so the email is visible in the right group
                 label_status = "dry_run" if dry_run else "success"
                 if not dry_run:
                     try:
@@ -302,27 +366,20 @@ def batch_process_emails(
                     except Exception as exc:
                         logger.warning("label_email failed for %s: %s", email["id"], exc)
                         label_status = "error"
-                log = ActionLog(
-                    user=user_id,
-                    action="label",
-                    email_id=email["id"],
-                    email_subject=email["subject"],
-                    label=label_name,
-                    status=label_status,
-                )
-                db.add(log)
+                db.add(ActionLog(
+                    user=user_id, action="label",
+                    email_id=email["id"], email_subject=email["subject"],
+                    label=label_name, status=label_status,
+                ))
                 db.commit()
 
-                # Archive emails whose project/thread is done
                 if cls.get("should_archive"):
                     status = "dry_run" if dry_run else "success"
                     if not dry_run:
                         provider.archive_email(email["id"])
                     log = ActionLog(
-                        user=user_id,
-                        action="archive",
-                        email_id=email["id"],
-                        email_subject=email["subject"],
+                        user=user_id, action="archive",
+                        email_id=email["id"], email_subject=email["subject"],
                         status=status,
                     )
                     db.add(log)
@@ -338,16 +395,15 @@ def batch_process_emails(
             saved_groups[name] = {
                 "group_id": result["group_id"],
                 "emails": len(email_ids),
-                "archived": sum(1 for _, cls in data["emails"] if cls.get("should_archive")),
+                "archived": sum(1 for _, c in data["emails"] if c.get("should_archive")),
                 "action": result["action"],
                 "summary": "",
             }
     finally:
         db.close()
 
-    # ── Step 5: incremental summary update — one call for all touched groups ────
-    # Uses existing summary (Firestore) + new email snippets (already in memory).
-    # No body re-fetching. Covers both new groups and existing groups with new emails.
+    # ── Step 6: incremental group summary update ──────────────────────────────
+    client = OpenAI()
     summary_blocks = []
     for name, info in saved_groups.items():
         existing_summary = existing_groups.get(name, "")
@@ -392,7 +448,10 @@ def batch_process_emails(
         except Exception as exc:
             logger.warning("Incremental summary update failed: %s", exc)
 
-    metrics.log_summary(label=f"batch_process_emails ({len(emails)} emails, {len(saved_groups)} groups)")
+    metrics.log_summary(
+        label=f"finalize_email_processing ({len(emails)} emails, {len(saved_groups)} groups)",
+        pipeline_stats={"processed": len(emails), "groups": len(saved_groups), "archived": len(archived)},
+    )
 
     result = {
         "scanned": total_scanned,
@@ -421,6 +480,34 @@ def batch_process_emails(
         )
 
     return result
+
+
+def batch_process_emails(
+    max_results: int = 20,
+    tool_context: ToolContext = None,
+) -> dict:
+    """Legacy single-call pipeline: pre-process + vector clustering + finalize.
+
+    Kept for backwards compatibility. Runs the full pipeline synchronously without
+    delegating to email_grouping_agent. Equivalent to GROUPING_MODE=vector.
+
+    Args:
+        max_results: Max emails to fetch (capped at 20).
+        tool_context: Injected by ADK — do not pass manually.
+    """
+    import os
+    orig_mode = os.environ.get("GROUPING_MODE")
+    os.environ["GROUPING_MODE"] = "vector"
+    try:
+        pre = pre_process_emails(max_results=max_results, tool_context=tool_context)
+        if pre.get("remaining", 0) == 0 and pre.get("processed", pre.get("scanned", 0)) == 0:
+            return pre
+        return finalize_email_processing(tool_context=tool_context)
+    finally:
+        if orig_mode is None:
+            os.environ.pop("GROUPING_MODE", None)
+        else:
+            os.environ["GROUPING_MODE"] = orig_mode
 
 
 def archive_email(

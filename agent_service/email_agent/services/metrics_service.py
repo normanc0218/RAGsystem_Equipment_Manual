@@ -61,8 +61,24 @@ class MetricsTracker:
         r.elapsed_s += elapsed_s
 
         pricing = _PRICE.get(model, {})
-        r.cost_usd += input_tokens * pricing.get("input", 0)
-        r.cost_usd += output_tokens * pricing.get("output", 0)
+        call_cost = (input_tokens * pricing.get("input", 0)
+                     + output_tokens * pricing.get("output", 0))
+        r.cost_usd += call_cost
+
+        # Trace each direct OpenAI SDK call to GCP Cloud Logging
+        try:
+            from .cloud_logging_service import log_llm_call
+            log_llm_call(
+                model=model,
+                agent_name=operation,
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                cost_usd=call_cost,
+                latency_s=elapsed_s,
+                success=True,
+            )
+        except Exception:
+            pass
 
     # ── Public wrappers ───────────────────────────────────────────────────────
 
@@ -96,8 +112,8 @@ class MetricsTracker:
         )
         return resp
 
-    def log_summary(self, label: str = "run"):
-        """Print a formatted cost breakdown to the server log."""
+    def log_summary(self, label: str = "run", pipeline_stats: dict | None = None):
+        """Print a formatted cost breakdown to the server log and write to GCP."""
         if not self._records:
             logger.info("[metrics] %s — no API calls recorded", label)
             return
@@ -105,6 +121,7 @@ class MetricsTracker:
         total_calls = sum(r.calls for r in self._records.values())
         total_cost = sum(r.cost_usd for r in self._records.values())
         total_time = sum(r.elapsed_s for r in self._records.values())
+        total_tokens = sum(r.input_tokens + r.output_tokens for r in self._records.values())
 
         lines = [f"[metrics] ── {label} ──────────────────────────"]
         for r in sorted(self._records.values(), key=lambda x: x.cost_usd, reverse=True):
@@ -132,6 +149,21 @@ class MetricsTracker:
             _METRICS_FILE.write_text(json.dumps(runs, indent=2))
         except Exception as exc:
             logger.warning("Failed to persist metrics snapshot: %s", exc)
+
+        if pipeline_stats:
+            try:
+                from .cloud_logging_service import log_pipeline_run
+                log_pipeline_run(
+                    label=label,
+                    processed=pipeline_stats.get("processed", 0),
+                    groups=pipeline_stats.get("groups", 0),
+                    archived=pipeline_stats.get("archived", 0),
+                    total_cost_usd=total_cost,
+                    total_tokens=total_tokens,
+                    elapsed_s=total_time,
+                )
+            except Exception:
+                pass
 
     def get_summary(self) -> dict:
         """Return summary dict for programmatic use."""

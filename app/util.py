@@ -59,6 +59,14 @@ def health():
     }
 
 
+@router.get("/auth/clear-cache")
+def clear_provider_cache():
+    """Force the Gmail provider singleton to reload — use after re-authenticating."""
+    from agent_service.email_agent.services.email_provider import _provider_cache
+    _provider_cache.clear()
+    return {"status": "provider cache cleared — next request will reload credentials"}
+
+
 # ── Gmail OAuth ───────────────────────────────────────────────────────────────
 
 @router.get("/auth/login")

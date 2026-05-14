@@ -4,6 +4,31 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+# Register GCP logging callback before ADK agents are imported.
+# ADK uses LiteLLM internally; this captures every agent model call.
+import litellm
+from .email_agent.services.litellm_callback import GCPLiteLLMCallback
+_gcp_cb = GCPLiteLLMCallback()
+
+# Sync callbacks fire for both sync and async LiteLLM calls via
+# handle_sync_success_callbacks_for_async_calls → executor → success_handler.
+litellm.success_callback = [_gcp_cb]
+litellm.failure_callback = [_gcp_cb]
+litellm._async_success_callback = []
+litellm._async_failure_callback = []
+
+# LiteLLM's GLOBAL_LOGGING_WORKER enqueues async_success_handler for every async
+# call and wraps it in asyncio.wait_for(timeout=20s). The handler times out on its
+# own internal processing regardless of our callbacks, producing TimeoutError spam.
+# Replacing ensure_initialized_and_enqueue with a no-op eliminates this entirely.
+# Sync callbacks above still capture all calls via the executor path.
+from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER as _litellm_worker
+
+def _noop_enqueue(async_coroutine):
+    async_coroutine.close()  # close immediately to avoid ResourceWarning
+
+_litellm_worker.ensure_initialized_and_enqueue = _noop_enqueue
+
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types

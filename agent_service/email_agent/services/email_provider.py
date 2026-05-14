@@ -2,10 +2,30 @@ import base64
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Gmail-style category label → group name (shared by GmailProvider and FakeProvider)
+GMAIL_LABEL_GROUPS: dict[str, str] = {
+    "CATEGORY_PROMOTIONS": "Promotions",
+    "CATEGORY_SOCIAL":     "Social Notifications",
+    "CATEGORY_UPDATES":    "Automated Updates",
+    "CATEGORY_FORUMS":     "Mailing Lists",
+}
+
+# Standard RFC headers that signal newsletter / mailing-list / bulk mail
+_TICKET_RE = re.compile(
+    r'\[([A-Z]+-\d+)\]'                          # [JIRA-123]
+    r'|(?:Invoice|PO|Order|Case)\s*#\s*\d+'       # Invoice #4521
+    r'|^\[([^\]]{2,30})\]',                        # [PROJECT] prefix
+    re.IGNORECASE,
+)
+
+# Emails that are safe to archive automatically in Layer 0
+_ARCHIVE_FAST_GROUPS = {"Promotions", "Social Notifications", "Automated Updates", "Mailing Lists", "Newsletters"}
 
 
 class EmailProvider(ABC):
@@ -46,6 +66,39 @@ class EmailProvider(ABC):
     @abstractmethod
     def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
         """Return emails carrying a specific label."""
+
+    def get_fast_group(self, email: dict) -> str | None:
+        """Return a group name from deterministic signals — no LLM needed.
+
+        Uses universal RFC headers available from any provider.
+        Returns None if the email needs LLM classification.
+        """
+        # List-ID → mailing list (RFC 2919, present on all list mail)
+        list_id = email.get("list_id", "")
+        if list_id:
+            name = list_id.strip("<>").split(".")[0].replace("-", " ").title()
+            return f"Mailing List: {name}" if name else "Mailing Lists"
+
+        # Precedence: bulk / list → newsletter or automated mail
+        prec = (email.get("precedence") or "").lower()
+        if prec in ("bulk", "list"):
+            return "Newsletters"
+
+        # List-Unsubscribe header → newsletter even without Precedence
+        if email.get("list_unsubscribe"):
+            return "Newsletters"
+
+        # Subject ticket/order pattern → support or billing group
+        subject = email.get("subject", "")
+        m = _TICKET_RE.search(subject)
+        if m:
+            ticket_id = m.group(1) or ""
+            if ticket_id:
+                project = ticket_id.split("-")[0]
+                return f"{project} Tickets"
+            return "Support Tickets"
+
+        return None
 
 
 class GmailProvider(EmailProvider):
@@ -158,17 +211,24 @@ class GmailProvider(EmailProvider):
                 logger.warning("Batch metadata failed for %s: %s", request_id, exception)
                 return
             headers = {
-                h["name"]: h["value"]
+                h["name"].lower(): h["value"]
                 for h in response.get("payload", {}).get("headers", [])
             }
             results[request_id] = {
                 "id": request_id,
                 "thread_id": response.get("threadId", ""),
-                "subject": headers.get("Subject", "(no subject)"),
-                "from": headers.get("From", ""),
-                "date": headers.get("Date", ""),
+                "subject": headers.get("subject", "(no subject)"),
+                "from": headers.get("from", ""),
+                "date": headers.get("date", ""),
                 "snippet": response.get("snippet", ""),
+                # Layer 0 grouping signals
+                "label_ids": response.get("labelIds", []),
+                "list_id": headers.get("list-id", ""),
+                "precedence": headers.get("precedence", ""),
+                "list_unsubscribe": headers.get("list-unsubscribe", ""),
             }
+
+        _METADATA_HEADERS = ["Subject", "From", "Date", "List-ID", "Precedence", "List-Unsubscribe"]
 
         # Gmail batch limit is 100 sub-requests per call
         for i in range(0, len(message_stubs), 100):
@@ -179,7 +239,7 @@ class GmailProvider(EmailProvider):
                     service.users().messages().get(
                         userId="me", id=stub["id"],
                         format="metadata",
-                        metadataHeaders=["Subject", "From", "Date"],
+                        metadataHeaders=_METADATA_HEADERS,
                     ),
                     request_id=stub["id"],
                 )
@@ -273,6 +333,12 @@ class GmailProvider(EmailProvider):
             if not any(lbl["id"].startswith(p) for p in system_prefixes)
         ]
 
+    def get_fast_group(self, email: dict) -> str | None:
+        for label in email.get("label_ids", []):
+            if label in GMAIL_LABEL_GROUPS:
+                return GMAIL_LABEL_GROUPS[label]
+        return super().get_fast_group(email)
+
     def fetch_emails_by_label(self, label_id: str, max_results: int = 100) -> list[dict]:
         service = self._get_service()
         message_ids = []
@@ -310,14 +376,14 @@ class FakeProvider(EmailProvider):
     """Returns hardcoded sample emails for local testing without Gmail credentials."""
 
     _EMAILS = [
-        {"id": "fake001", "thread_id": "thread-promo-1", "subject": "50% off your next order!", "from": "deals@shop.com", "date": "Mon, 4 May 2026 08:00:00 +0000", "snippet": "Limited time offer just for you."},
-        {"id": "fake002", "thread_id": "thread-billing-1", "subject": "Your invoice #4821 is ready", "from": "billing@saas.io", "date": "Mon, 4 May 2026 09:15:00 +0000", "snippet": "Please review and pay by May 15."},
-        {"id": "fake003", "thread_id": "thread-newsletter-1", "subject": "Weekly newsletter: AI trends", "from": "editor@aiweekly.com", "date": "Sun, 3 May 2026 18:00:00 +0000", "snippet": "Top 5 AI stories this week."},
-        {"id": "fake004", "thread_id": "thread-work-1", "subject": "Meeting notes from Monday standup", "from": "team@company.com", "date": "Mon, 4 May 2026 10:30:00 +0000", "snippet": "Action items assigned to you."},
-        {"id": "fake005", "thread_id": "thread-work-2", "subject": "Your GitHub PR was merged", "from": "noreply@github.com", "date": "Mon, 4 May 2026 11:00:00 +0000", "snippet": "Pull request #42 was merged into main."},
-        {"id": "fake006", "thread_id": "thread-promo-2", "subject": "Flash sale ends tonight!", "from": "promo@retailer.com", "date": "Mon, 4 May 2026 07:00:00 +0000", "snippet": "Don't miss out — 24 hours only."},
-        {"id": "fake007", "thread_id": "thread-security-1", "subject": "Security alert: new login detected", "from": "security@accounts.google.com", "date": "Mon, 4 May 2026 06:45:00 +0000", "snippet": "New sign-in from Chrome on Mac."},
-        {"id": "fake008", "thread_id": "thread-work-3", "subject": "Q2 OKR review — please fill in", "from": "manager@company.com", "date": "Fri, 1 May 2026 16:00:00 +0000", "snippet": "Please update your OKR tracker by EOD Friday."},
+        {"id": "fake001", "thread_id": "thread-promo-1",      "subject": "50% off your next order!",            "from": "deals@shop.com",                  "date": "Mon, 4 May 2026 08:00:00 +0000", "snippet": "Limited time offer just for you.",              "label_ids": ["CATEGORY_PROMOTIONS"], "list_id": "", "precedence": "",     "list_unsubscribe": ""},
+        {"id": "fake002", "thread_id": "thread-billing-1",    "subject": "Your invoice #4821 is ready",         "from": "billing@saas.io",                 "date": "Mon, 4 May 2026 09:15:00 +0000", "snippet": "Please review and pay by May 15.",             "label_ids": ["CATEGORY_UPDATES"],    "list_id": "", "precedence": "",     "list_unsubscribe": ""},
+        {"id": "fake003", "thread_id": "thread-newsletter-1", "subject": "Weekly newsletter: AI trends",        "from": "editor@aiweekly.com",             "date": "Sun, 3 May 2026 18:00:00 +0000", "snippet": "Top 5 AI stories this week.",                  "label_ids": [],                      "list_id": "<weekly.aiweekly.com>", "precedence": "list", "list_unsubscribe": "<mailto:unsub@aiweekly.com>"},
+        {"id": "fake004", "thread_id": "thread-work-1",       "subject": "Meeting notes from Monday standup",  "from": "team@company.com",                "date": "Mon, 4 May 2026 10:30:00 +0000", "snippet": "Action items assigned to you.",               "label_ids": [],                      "list_id": "", "precedence": "",     "list_unsubscribe": ""},
+        {"id": "fake005", "thread_id": "thread-work-2",       "subject": "Your GitHub PR was merged",          "from": "noreply@github.com",              "date": "Mon, 4 May 2026 11:00:00 +0000", "snippet": "Pull request #42 was merged into main.",      "label_ids": ["CATEGORY_UPDATES"],    "list_id": "", "precedence": "",     "list_unsubscribe": ""},
+        {"id": "fake006", "thread_id": "thread-promo-2",      "subject": "Flash sale ends tonight!",           "from": "promo@retailer.com",              "date": "Mon, 4 May 2026 07:00:00 +0000", "snippet": "Don't miss out — 24 hours only.",             "label_ids": ["CATEGORY_PROMOTIONS"], "list_id": "", "precedence": "bulk", "list_unsubscribe": ""},
+        {"id": "fake007", "thread_id": "thread-security-1",   "subject": "Security alert: new login detected", "from": "security@accounts.google.com",    "date": "Mon, 4 May 2026 06:45:00 +0000", "snippet": "New sign-in from Chrome on Mac.",             "label_ids": ["CATEGORY_UPDATES"],    "list_id": "", "precedence": "",     "list_unsubscribe": ""},
+        {"id": "fake008", "thread_id": "thread-work-3",       "subject": "Q2 OKR review — please fill in",    "from": "manager@company.com",             "date": "Fri, 1 May 2026 16:00:00 +0000", "snippet": "Please update your OKR tracker by EOD Friday.", "label_ids": [],                      "list_id": "", "precedence": "",     "list_unsubscribe": ""},
     ]
 
     _BODIES = {
@@ -330,6 +396,12 @@ class FakeProvider(EmailProvider):
         "fake007": "We noticed a new sign-in to your Google Account from Chrome on Mac in Toronto, CA. If this was you, no action needed.",
         "fake008": "Hi team, Q2 OKR review is due. Please update your tracker with progress on key results by EOD Friday.",
     }
+
+    def get_fast_group(self, email: dict) -> str | None:
+        for label in email.get("label_ids", []):
+            if label in GMAIL_LABEL_GROUPS:
+                return GMAIL_LABEL_GROUPS[label]
+        return super().get_fast_group(email)
 
     def fetch_emails(self, max_results: int = 200, random_sample: bool = False) -> List[Dict[str, Any]]:
         return self._EMAILS[:max_results]
